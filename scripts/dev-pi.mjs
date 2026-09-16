@@ -4,11 +4,11 @@ import { join } from 'node:path';
 import { loadEnvFile } from 'node:process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+// Optional: a private .env can supply TYPESAFE_API_KEY; otherwise use /typesafe login inside Pi.
 try {
   loadEnvFile(join(root, '.env'));
 } catch {
-  console.error('Create a private project .env with TYPESAFE_API_KEY before starting the development session.');
-  process.exit(1);
+  // No .env present; the stored key from /typesafe login (if any) is used.
 }
 const child = spawn('pi', ['-e', root, ...process.argv.slice(2)], {
   cwd: root,

@@ -1,10 +1,11 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
+import { resolveApiKey } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { parseEvaluationRequest } from "./schema.js";
 
 export interface TypeSafeOptions {
-  /** Defaults to TYPESAFE_API_KEY; never persisted or returned. */
+  /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
   apiKey?: string;
   /** Defaults to jev-latest. No model is inferred from submitted content. */
   model?: string;
@@ -27,6 +28,8 @@ export interface UsageSnapshot {
 }
 export interface TypeSafe {
   evaluate<Q extends Questions>(request: SystemOneRequest<Q>, options?: EvaluationOptions): Promise<Evaluation<Q>>;
+  /** Model names available to the account. Verifies the key; does not count toward maxRequests. */
+  listModels(options?: EvaluationOptions): Promise<string[]>;
   getUsage(): UsageSnapshot;
 }
 
@@ -64,8 +67,8 @@ function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions:
 
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
-  const apiKey = (options.apiKey ?? process.env.TYPESAFE_API_KEY)?.trim();
-  if (!apiKey) throw new TypeSafeIntegrationError("configuration", "Set TYPESAFE_API_KEY in the process environment before using TypeSafe.");
+  const apiKey = options.apiKey?.trim() || resolveApiKey()?.key;
+  if (!apiKey) throw new TypeSafeIntegrationError("configuration", "No TypeSafe API key. Run /typesafe login in Pi, or set TYPESAFE_API_KEY in the environment.");
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
   const maxInputBytes = positiveInteger(options.maxInputBytes ?? 65_536, "maxInputBytes");
   const maxRequests = positiveInteger(options.maxRequests ?? 20, "maxRequests");
@@ -85,6 +88,15 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
 
   return {
     getUsage: () => ({ ...usage }),
+    async listModels(callOptions: EvaluationOptions = {}): Promise<string[]> {
+      try {
+        const models = await client.models.list(callOptions);
+        if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected model list.");
+        return models.map(card => card?.name).filter((name): name is string => typeof name === "string" && name.length > 0 && name.length <= 100);
+      } catch (error) {
+        throw safeError(error);
+      }
+    },
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
       const validated = parseEvaluationRequest(input);
       const body = JSON.stringify({ ...validated, model: validated.model ?? model });

@@ -3,7 +3,9 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
 import { createTypeSafe } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
+import { clearStoredApiKey, credentialsPath, normalizeApiKey, resolveApiKey, storeApiKey } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
+import { promptForApiKey } from "./key-prompt.js";
 import { evaluationSchema, parseEvaluationRequest } from "./schema.js";
 
 const disclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
@@ -35,7 +37,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   let enabled = process.env.PI_TYPESAFE_ENABLED === "1";
   let client: TypeSafe | undefined;
   const getClient = () => client ??= createTypeSafe();
-  const keyAvailable = () => Boolean(process.env.TYPESAFE_API_KEY?.trim());
+  const keySource = () => resolveApiKey()?.source;
 
   pi.on("session_start", async () => {
     enabled = process.env.PI_TYPESAFE_ENABLED === "1";
@@ -70,9 +72,9 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const actions = ["setup", "status", "enable", "disable", "test", "playground"];
+  const actions = ["login", "logout", "setup", "status", "enable", "disable", "test", "playground"];
   pi.registerCommand("typesafe", {
-    description: "TypeSafe setup, consent, usage, sample test, and JSON playground",
+    description: "TypeSafe login, consent, usage, sample test, and JSON playground",
     getArgumentCompletions(prefix) {
       const matches = actions.filter(action => action.startsWith(prefix)).map(action => ({ value: action, label: action }));
       return matches.length ? matches : null;
@@ -84,15 +86,17 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
       };
       try {
-        if (action === "setup") {
-          report(keyAvailable()
-            ? "TYPESAFE_API_KEY is configured. Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls."
-            : "Set TYPESAFE_API_KEY in Pi's process environment, then restart Pi. Never paste the key into chat or command arguments. See README setup for a hidden-input prompt.");
-          return;
-        }
         if (action === "status") {
           const usage = client?.getUsage();
-          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}; key ${keyAvailable() ? "configured" : "missing"}; ${usage?.requestsStarted ?? 0}/20 attempts; ${usage?.requestsSucceeded ?? 0} successful; ${usage?.inputTokens ?? 0} input tokens. Model: jev-latest. Limits reset on session start/reload. ${disclosure}`);
+          const source = keySource();
+          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}; key ${source ? `from ${source === "stored" ? "/typesafe login" : "TYPESAFE_API_KEY"}` : "missing (run /typesafe login)"}; ${usage?.requestsStarted ?? 0}/20 attempts; ${usage?.requestsSucceeded ?? 0} successful; ${usage?.inputTokens ?? 0} input tokens. Model: jev-latest. Limits reset on session start/reload. ${disclosure}`);
+          return;
+        }
+        if (action === "logout") {
+          const removed = clearStoredApiKey();
+          client = undefined;
+          enabled = false;
+          report(removed ? `Removed the stored key at ${credentialsPath()}. TypeSafe is disabled.` : "No stored key to remove." + (process.env.TYPESAFE_API_KEY?.trim() ? " TYPESAFE_API_KEY is still set in the environment." : ""));
           return;
         }
         if (action === "disable") {
@@ -108,8 +112,27 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           report("This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and TYPESAFE_API_KEY before launching Pi.", "warning");
           return;
         }
+        if (action === "login" || (action === "setup" && !keySource())) {
+          if (process.env.TYPESAFE_API_KEY?.trim()) {
+            report("TYPESAFE_API_KEY is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.", "warning");
+            return;
+          }
+          const entered = await promptForApiKey(ctx);
+          if (entered === undefined) { report("Login cancelled; nothing was saved."); return; }
+          const key = normalizeApiKey(entered);
+          // Verify with a model listing before saving so a bad paste fails here, not on first use.
+          const models = await createTypeSafe({ apiKey: key }).listModels();
+          const path = storeApiKey(key);
+          client = undefined;
+          report(`Key verified (${models.length} model${models.length === 1 ? "" : "s"} available) and saved to ${path} with owner-only permissions. Run /typesafe enable to allow agent tool calls.`);
+          return;
+        }
+        if (action === "setup") {
+          report(`Key configured via ${keySource() === "stored" ? "/typesafe login" : "TYPESAFE_API_KEY"}. Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls.`);
+          return;
+        }
         if (action === "enable") {
-          if (!keyAvailable()) { report("Run /typesafe setup first: TYPESAFE_API_KEY is missing.", "warning"); return; }
+          if (!keySource()) { report("Run /typesafe login first: no API key is configured.", "warning"); return; }
           if (await ctx.ui.confirm("Enable TypeSafe for this session?", disclosure)) {
             enabled = true;
             report("TypeSafe enabled. Up to 20 attempts in this session; /typesafe disable stops future agent calls.");

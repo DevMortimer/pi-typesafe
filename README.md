@@ -17,21 +17,18 @@ Requires Pi 0.85 or newer and Node.js 22.19 or newer. Bring your own TypeSafe AP
 ## Setup
 
 1. Get a key at [console.typesafe.ai](https://console.typesafe.ai) (API Keys).
-2. Put it in the environment of the shell that starts Pi. To avoid shell history:
+2. In Pi, run `/typesafe login` and paste the key. Input is hidden; the key is verified against the API, then saved to `~/.pi/agent/pi-typesafe/auth.json` with owner-only permissions.
+3. Run `/typesafe test` for one sample request, or `/typesafe enable` to let the agent call the tool.
 
-   ```bash
-   read -rs TYPESAFE_API_KEY && export TYPESAFE_API_KEY
-   ```
-
-3. Start Pi and run `/typesafe setup`, then `/typesafe test` for one sample request.
-
-Do not paste the key into chat, command arguments, or project files.
+Other extensions built on this package pick up the same stored key automatically. For CI or scripts, set `TYPESAFE_API_KEY` in the environment instead; it takes precedence over the stored key. Do not paste the key into chat, command arguments, or project files.
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/typesafe setup` | Check that a key is configured |
+| `/typesafe login` | Enter and verify an API key (hidden input), then store it |
+| `/typesafe logout` | Delete the stored key and disable the tool |
+| `/typesafe setup` | Check which key is in use; starts login if none |
 | `/typesafe status` | Opt-in state, attempts used, token totals |
 | `/typesafe enable` | Confirm the data notice and allow agent tool calls this session |
 | `/typesafe disable` | Stop future agent tool calls |
@@ -87,7 +84,7 @@ Import the library from your own extension. It has no dependency on Pi and is sa
 ```ts
 import { createTypeSafe, choice, noul, score } from "pi-typesafe";
 
-const typesafe = createTypeSafe({ maxRequests: 5 });       // key from TYPESAFE_API_KEY
+const typesafe = createTypeSafe({ maxRequests: 5 });       // key: TYPESAFE_API_KEY, else the /typesafe login store
 const result = await typesafe.evaluate({
   state: { title: "Login fails after update", body: "..." },
   questions: {
@@ -104,6 +101,8 @@ result.usage, result.elapsedMs, typesafe.getUsage();
 
 - `createTypeSafe(options)`: `apiKey`, `model` (default `jev-latest`), `timeoutMs`, `maxInputBytes`, `maxRequests`, `fetch` (inject a transport for offline tests).
 - `evaluate(request, { signal })` validates before sending and rejects with `TypeSafeIntegrationError` (`code`: `configuration`, `validation`, `budget`, `aborted`, `timeout`, `http`, `connection`, `response`).
+- `listModels()` verifies the key with a GET request that does not count toward `maxRequests`.
+- `resolveApiKey()` reports whether a key comes from the environment or the login store, without your extension handling the value; `credentialsPath()` tells users where it lives.
 - `evaluationSchema` (TypeBox) and `parseEvaluationRequest` are exported for tools that accept request JSON.
 - Your extension owns its own user consent and budget; `/typesafe enable` applies only to this package's tool.
 
@@ -116,7 +115,7 @@ npm install
 npm run check        # typecheck, offline tests, build
 cp .env.example .env # add your key locally; .env is git-ignored
 npm run test:live    # one billable sample request
-npm run dev:pi       # start Pi with this package loaded from the working tree
+npm run dev:pi       # start Pi with this package loaded from the working tree (.env optional)
 ```
 
 ## License

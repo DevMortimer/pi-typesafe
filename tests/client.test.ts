@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, test } from "node:test";
 import { createTypeSafe, choice, noul, score, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
 import type { Questions, SystemOneRequest } from "../src/index.js";
 
@@ -15,6 +18,17 @@ export function responseFor(questions: Questions): Response {
   return Response.json({ model: "jev-test", answers, usage: { input_tokens: 42, output_tokens: 0 } });
 }
 const sample = () => ({ state: "synthetic", questions: { yes: noul("Is this synthetic?") } });
+const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+const savedKey = process.env.TYPESAFE_API_KEY;
+before(() => {
+  // Keep the developer's real stored key and environment out of these tests.
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-typesafe-client-"));
+  delete process.env.TYPESAFE_API_KEY;
+});
+after(() => {
+  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedKey;
+});
 const hasCode = (code: string) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === code;
 
 test("official SDK helpers, typed answers, metadata, and one batched network call", async () => {
