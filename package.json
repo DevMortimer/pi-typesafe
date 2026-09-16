@@ -1,7 +1,7 @@
 {
   "name": "pi-typesafe",
   "version": "0.2.3",
-  "description": "TypeSafe decisions for Pi: a batched evaluation tool, terminal playground, and typed API for extension authors.",
+  "description": "TypeSafe AI (Jev) decisions for Pi: batched Choice/Score/Noul evaluation tool, terminal playground, and a typed API other extensions build on.",
   "type": "module",
   "license": "MIT",
   "author": "Ryan Gapac",
