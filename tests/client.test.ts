@@ -1,0 +1,197 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { createTypeSafe, choice, noul, score, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
+import type { Questions, SystemOneRequest } from "../src/index.js";
+
+export function responseFor(questions: Questions): Response {
+  const answers = Object.fromEntries(Object.entries(questions).map(([id, q]) => {
+    if (q.type === "noul") return [id, { type: "noul", noul: 0.9 }];
+    if (q.type === "choice") {
+      const keys = Object.keys(q.criteria);
+      return [id, { type: "choice", choice: keys[0], confidence: 1, probabilities: Object.fromEntries(keys.map((key, i) => [key, i === 0 ? 1 : 0])) }];
+    }
+    return [id, { type: "score", score: 0, confidence: 1, probabilities: Object.fromEntries(q.criteria.map((_, i) => [i, i === 0 ? 1 : 0])), legend: Object.fromEntries(q.criteria.map((level, i) => [i, level])) }];
+  }));
+  return Response.json({ model: "jev-test", answers, usage: { input_tokens: 42, output_tokens: 0 } });
+}
+const sample = () => ({ state: "synthetic", questions: { yes: noul("Is this synthetic?") } });
+const hasCode = (code: string) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === code;
+
+test("official SDK helpers, typed answers, metadata, and one batched network call", async () => {
+  let calls = 0;
+  const questions = {
+    category: choice("Which?", { billing: "Charges", other: null }),
+    urgent: noul("Urgent?"),
+    frustration: score("Frustration?", ["Calm", "Angry"]),
+  };
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async (url, init) => {
+    calls++;
+    assert.equal(url, "https://api.typesafe.ai/v1/systemone");
+    assert.equal(init?.method, "POST");
+    const request = JSON.parse(String(init?.body));
+    assert.deepEqual(request.questions, JSON.parse(JSON.stringify(questions)));
+    assert.equal(request.model, "jev-latest");
+    assert.ok(Object.values(Object.fromEntries(new Headers(init?.headers))).some(value => value.includes("test-key")));
+    return responseFor(questions);
+  } });
+  const result = await client.evaluate({ state: { message: "Example" }, questions });
+  const category: "billing" | "other" = result.answers.category.choice;
+  const yes: number = result.answers.urgent.noul;
+  const value: number = result.answers.frustration.score;
+  assert.equal(category, "billing");
+  assert.equal(yes, 0.9);
+  assert.equal(value, 0);
+  assert.equal(calls, 1);
+  assert.ok(result.elapsedMs >= 0);
+  assert.deepEqual(client.getUsage(), { requestsStarted: 1, requestsSucceeded: 1, inputTokens: 42, outputTokens: 0 });
+});
+
+test("structured state, descriptions, and null values are supported", () => {
+  assert.doesNotThrow(() => parseEvaluationRequest({ state: null, questions: {
+    yes: noul({ goal: "Check" }, { true: ["a"], false: null }),
+    pick: choice(["Choose"], { a: { detail: "a" }, b: null }),
+    rating: score(null, [null, { level: "high" }]),
+  } }));
+});
+
+test("invalid questions are rejected before network submission without echoing state", async () => {
+  const secret = "private-user-content";
+  let calls = 0;
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async () => { calls++; throw new Error(secret); } });
+  const invalid = [
+    { state: secret, questions: {} },
+    { state: secret, questions: { q: { type: "score", criteria: ["one"] } } },
+    { state: secret, questions: { q: { type: "choice", criteria: {} } } },
+    { state: secret, questions: { q: { type: "unsupported" } } },
+    { state: secret, questions: { q: noul("yes") }, apiKey: secret },
+    { state: secret, questions: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`q${i}`, noul("yes")])) },
+  ];
+  for (const request of invalid) {
+    await assert.rejects(() => Reflect.apply(client.evaluate, client, [request]), error => {
+      assert.ok(error instanceof TypeSafeIntegrationError);
+      assert.equal(error.code, "validation");
+      assert.equal(error.message.includes(secret), false);
+      return true;
+    });
+  }
+  assert.equal(calls, 0);
+  assert.equal(client.getUsage().requestsStarted, 0);
+});
+
+test("non-JSON state, getters, cycles, and excessive nesting are rejected", () => {
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  let nested: unknown = null;
+  for (let i = 0; i < 70; i++) nested = { nested };
+  const invalid = [cycle, { n: NaN }, { n: Infinity }, { n: 1n }, { fn: () => null }, new Date(), nested,
+    Object.defineProperty({}, "secret", { enumerable: true, get() { throw new Error("must not read"); } })];
+  for (const state of invalid) assert.throws(() => parseEvaluationRequest({ state, questions: sample().questions }), hasCode("validation"));
+});
+
+test("UTF-8 byte limit applies before submission", async () => {
+  const client = createTypeSafe({ apiKey: "test-key", maxInputBytes: 180, fetch: async () => { throw new Error("must not run"); } });
+  await assert.rejects(client.evaluate({ ...sample(), state: "🙂".repeat(50) }), hasCode("validation"));
+  assert.equal(client.getUsage().requestsStarted, 0);
+});
+
+test("request budget is shared across concurrent calls and failures", async () => {
+  let calls = 0;
+  const client = createTypeSafe({ apiKey: "test-key", maxRequests: 2, fetch: async () => {
+    calls++;
+    return Response.json({ error: "do not display this upstream body" }, { status: 500 });
+  } });
+  const results = await Promise.allSettled([client.evaluate(sample()), client.evaluate(sample()), client.evaluate(sample())]);
+  assert.equal(calls, 2);
+  assert.equal(results.filter(result => result.status === "rejected").length, 3);
+  await assert.rejects(client.evaluate(sample()), hasCode("budget"));
+  assert.equal(client.getUsage().requestsStarted, 2);
+  assert.equal(client.getUsage().requestsSucceeded, 0);
+});
+
+test("HTTP errors are classified, never retried, and do not expose response secrets", async () => {
+  for (const status of [400, 401, 403, 422, 429, 500, 503]) {
+    let calls = 0;
+    const client = createTypeSafe({ apiKey: "test-key", fetch: async () => {
+      calls++;
+      return Response.json({ secret: "never-print-me" }, { status });
+    } });
+    await assert.rejects(client.evaluate(sample()), error => {
+      assert.ok(error instanceof TypeSafeIntegrationError);
+      assert.equal(error.code, "http");
+      assert.equal(error.status, status);
+      assert.equal(JSON.stringify(error).includes("never-print-me"), false);
+      assert.equal(String(error).includes("never-print-me"), false);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test("cancellation before submission does not consume an attempt", async () => {
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async () => { throw new Error("must not run"); } });
+  await assert.rejects(client.evaluate(sample(), { signal: AbortSignal.abort() }), hasCode("aborted"));
+  assert.equal(client.getUsage().requestsStarted, 0);
+});
+
+test("in-flight cancellation and timeout reach the transport", async () => {
+  const pending = async (_url: string, init?: RequestInit): Promise<Response> => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")), { once: true });
+  });
+  const controller = new AbortController();
+  const client = createTypeSafe({ apiKey: "test-key", fetch: pending, timeoutMs: 1000 });
+  const request = client.evaluate(sample(), { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(request, hasCode("aborted"));
+  const timed = createTypeSafe({ apiKey: "test-key", fetch: pending, timeoutMs: 10 });
+  await assert.rejects(timed.evaluate(sample()), hasCode("timeout"));
+});
+
+test("malformed successful responses fail safely", async () => {
+  for (const response of [Response.json({ secret: "private" }), new Response("not-json"), Response.json({ model: "test", usage: { input_tokens: 1, output_tokens: 0 }, answers: { yes: { type: "noul", noul: 5 } } })]) {
+    const client = createTypeSafe({ apiKey: "test-key", fetch: async () => response });
+    await assert.rejects(client.evaluate(sample()), hasCode("response"));
+    assert.equal(client.getUsage().requestsSucceeded, 0);
+  }
+});
+
+test("client ignores SDK endpoint and logging environment overrides", async () => {
+  const originalUrl = process.env.TYPESAFE_BASE_URL;
+  const originalLog = process.env.TYPESAFE_LOG_LEVEL;
+  process.env.TYPESAFE_BASE_URL = "https://untrusted.invalid";
+  process.env.TYPESAFE_LOG_LEVEL = "debug";
+  try {
+    const client = createTypeSafe({ apiKey: "test-key", fetch: async (url) => {
+      assert.ok(url.startsWith("https://api.typesafe.ai/"));
+      return responseFor(sample().questions);
+    } });
+    await client.evaluate(sample());
+  } finally {
+    if (originalUrl === undefined) delete process.env.TYPESAFE_BASE_URL; else process.env.TYPESAFE_BASE_URL = originalUrl;
+    if (originalLog === undefined) delete process.env.TYPESAFE_LOG_LEVEL; else process.env.TYPESAFE_LOG_LEVEL = originalLog;
+  }
+});
+
+test("configuration errors are early and usage snapshots are detached", async () => {
+  assert.throws(() => createTypeSafe({ apiKey: " " }), hasCode("configuration"));
+  for (const options of [{ timeoutMs: 0 }, { maxRequests: -1 }, { maxInputBytes: NaN }, { model: "" }]) {
+    assert.throws(() => createTypeSafe({ apiKey: "test-key", ...options }), hasCode("configuration"));
+  }
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async () => responseFor(sample().questions) });
+  const snapshot = client.getUsage();
+  await client.evaluate(sample());
+  assert.equal(snapshot.requestsStarted, 0);
+  assert.equal(client.getUsage().requestsStarted, 1);
+});
+
+test("request data is snapshotted before asynchronous work", async () => {
+  let sent: SystemOneRequest | undefined;
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async (_url, init) => {
+    sent = JSON.parse(String(init?.body));
+    return responseFor(sample().questions);
+  } });
+  const request = sample();
+  const result = client.evaluate(request);
+  request.state = "changed";
+  await result;
+  assert.equal(sent?.state, "synthetic");
+});
