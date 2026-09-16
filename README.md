@@ -6,7 +6,7 @@ TypeSafe decisions inside [Pi](https://pi.dev): one batched evaluation tool for 
 
 Independent project. Not affiliated with TypeSafe AI or the Pi authors.
 
-![Pi triaging three bug reports with one batched TypeSafe call: the prompt, the rendered TypeSafe answers, and the agent's verdict](docs/preview.png)
+![Pi triaging three bug reports with one batched TypeSafe call: the prompt, the rendered TypeSafe answers, and the agent's verdict](https://raw.githubusercontent.com/DevMortimer/pi-typesafe/main/docs/preview.png)
 
 ## Install
 

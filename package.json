@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "TypeSafe decisions for Pi: a batched evaluation tool, terminal playground, and typed API for extension authors.",
   "type": "module",
   "license": "MIT",
