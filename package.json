@@ -35,13 +35,14 @@
   },
   "files": [
     "dist",
+    "extensions",
     "examples",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./dist/extension.js"
+      "./extensions/index.js"
     ]
   },
   "scripts": {
