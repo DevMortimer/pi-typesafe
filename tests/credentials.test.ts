@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
-import { clearStoredApiKey, credentialsPath, normalizeApiKey, readStoredApiKey, resolveApiKey, storeApiKey } from "../src/credentials.js";
+import { clearStoredApiKey, credentialsPath, keySituation, keySourceLabel, normalizeApiKey, readStoredApiKey, resolveApiKey, storeApiKey } from "../src/credentials.js";
 import { createTypeSafe, TypeSafeIntegrationError } from "../src/index.js";
 
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -88,4 +88,32 @@ test("createTypeSafe uses the stored key and listModels verifies it without spen
 test("invalid keys fail verification with a safe message", async () => {
   const client = createTypeSafe({ apiKey: validKey, fetch: async () => Response.json({ detail: "secret-body" }, { status: 401 }) });
   await assert.rejects(client.listModels(), (error: unknown) => error instanceof TypeSafeIntegrationError && error.status === 401 && !error.message.includes("secret-body"));
+});
+
+test("keySituation is total and names every kind", { skip: process.platform === "win32" }, () => {
+  assert.deepEqual(keySituation(), { kind: "missing" });
+
+  storeApiKey(validKey);
+  assert.deepEqual(keySituation(), { kind: "stored", key: validKey, path: credentialsPath() });
+
+  chmodSync(credentialsPath(), 0o644);
+  const situation = keySituation();
+  assert.ok(situation.kind === "unusable");
+  assert.equal(situation.path, credentialsPath());
+  assert.match(situation.reason, /chmod 600/);
+  assert.throws(() => resolveApiKey(), (error: unknown) => error instanceof TypeSafeIntegrationError && error.message === situation.reason);
+
+  process.env.TYPESAFE_API_KEY = `  ${validKey}  `;
+  assert.deepEqual(keySituation(), { kind: "environment", key: validKey });
+
+  // Environment values are trusted as-is; a wrong key fails at the API with its own advice.
+  process.env.TYPESAFE_API_KEY = "short";
+  assert.deepEqual(keySituation(), { kind: "environment", key: "short" });
+});
+
+test("keySourceLabel names each source", () => {
+  assert.equal(keySourceLabel({ kind: "environment", key: "k" }), "TYPESAFE_API_KEY");
+  assert.equal(keySourceLabel({ kind: "stored", key: "k", path: "/tmp/auth.json" }), "/typesafe login");
+  assert.equal(keySourceLabel({ kind: "missing" }), "no key");
+  assert.equal(keySourceLabel({ kind: "unusable", path: "/tmp/auth.json", reason: "r" }), "unusable key");
 });

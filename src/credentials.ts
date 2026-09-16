@@ -5,6 +5,13 @@ import { TypeSafeIntegrationError } from "./errors.js";
 
 export type KeySource = "environment" | "stored";
 
+/** The complete, never-throwing answer to "which key is in effect". */
+export type KeySituation =
+  | { readonly kind: "environment"; readonly key: string }
+  | { readonly kind: "stored"; readonly key: string; readonly path: string }
+  | { readonly kind: "missing" }
+  | { readonly kind: "unusable"; readonly path: string; readonly reason: string };
+
 /** Mirrors Pi's agent directory rule so the file sits next to Pi's own auth.json. */
 export function credentialsPath(): string {
   const configured = process.env.PI_CODING_AGENT_DIR?.trim();
@@ -23,6 +30,10 @@ export function normalizeApiKey(value: unknown): string {
   return key;
 }
 
+/**
+ * The stored key, or `undefined` when the file is missing, unreadable, or holds no usable value. Throws
+ * `configuration` when the file is readable by other users; keySituation() reports that case as `unusable` instead.
+ */
 export function readStoredApiKey(): string | undefined {
   const path = credentialsPath();
   try {
@@ -39,12 +50,44 @@ export function readStoredApiKey(): string | undefined {
   }
 }
 
-/** Environment first so CI and scripts stay explicit; the stored key is the interactive default. */
-export function resolveApiKey(): { key: string; source: KeySource } | undefined {
+/**
+ * What the environment, the login store, and file permissions add up to right now. Never throws; the "unusable" kind
+ * carries the user-facing reason (a stored key that other local users can read).
+ */
+export function keySituation(): KeySituation {
   const fromEnvironment = process.env.TYPESAFE_API_KEY?.trim();
-  if (fromEnvironment) return { key: fromEnvironment, source: "environment" };
-  const stored = readStoredApiKey();
-  return stored ? { key: stored, source: "stored" } : undefined;
+  if (fromEnvironment) return { kind: "environment", key: fromEnvironment };
+  const path = credentialsPath();
+  try {
+    const key = readStoredApiKey();
+    return key ? { kind: "stored", key, path } : { kind: "missing" };
+  } catch (error) {
+    // readStoredApiKey only throws for a store this process must not use; report it instead of failing the caller.
+    if (error instanceof TypeSafeIntegrationError && error.code === "configuration") return { kind: "unusable", path, reason: error.message };
+    throw error;
+  }
+}
+
+/** Short phrase naming the source; full sentences stay with the caller. */
+export function keySourceLabel(situation: KeySituation): string {
+  switch (situation.kind) {
+    case "environment": return "TYPESAFE_API_KEY";
+    case "stored": return "/typesafe login";
+    case "missing": return "no key";
+    case "unusable": return "unusable key";
+  }
+}
+
+/**
+ * The pre-0.4.0 key interface, frozen for existing callers: environment first so CI and scripts stay explicit, the
+ * stored key as the interactive default, `undefined` when no key is configured, and a `configuration` error when a
+ * store must not be read. New code should call keySituation() instead: same precedence, never throws, and the
+ * "must not be read" case arrives as `unusable` with the reason.
+ */
+export function resolveApiKey(): { key: string; source: KeySource } | undefined {
+  const situation = keySituation();
+  if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
+  return situation.kind === "environment" || situation.kind === "stored" ? { key: situation.key, source: situation.kind } : undefined;
 }
 
 export function storeApiKey(value: unknown): string {

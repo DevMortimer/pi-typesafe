@@ -2,12 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
-import { createTypeSafe } from "./client.js";
+import { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
-import { clearStoredApiKey, credentialsPath, resolveApiKey } from "./credentials.js";
+import { clearStoredApiKey, credentialsPath, keySituation, keySourceLabel } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { loginWithPrompt } from "./login.js";
-import { evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest } from "./schema.js";
+import { DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, prepareEvaluationRequest } from "./schema.js";
 
 const disclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
 const sample = {
@@ -38,7 +38,6 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   let enabled = process.env.PI_TYPESAFE_ENABLED === "1";
   let client: TypeSafe | undefined;
   const getClient = () => client ??= createTypeSafe();
-  const keySource = () => resolveApiKey()?.source;
 
   pi.on("session_start", async () => {
     enabled = process.env.PI_TYPESAFE_ENABLED === "1";
@@ -50,7 +49,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "typesafe_evaluate",
     label: "TypeSafe",
-    description: `Evaluate supplied state with independent Choice, Score, and Noul questions in one TypeSafe request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${disclosure} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, 64 KiB JSON, 20 attempts per session; no retries.`,
+    description: `Evaluate supplied state with independent Choice, Score, and Noul questions in one TypeSafe request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${disclosure} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${DEFAULT_MAX_INPUT_BYTES / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`,
     promptSnippet: "Ask batched structured questions with TypeSafe (external service; operator opt-in required)",
     promptGuidelines: [
       "Use typesafe_evaluate only for requested semantic judgments, not calculations or exact lookups; send only the relevant permitted data.",
@@ -63,7 +62,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     prepareArguments: args => normalizeEvaluationRequest(args) as Static<typeof evaluationSchema>,
     async execute(_id, params, signal) {
       if (!enabled) throw new TypeSafeIntegrationError("configuration", "TypeSafe is disabled. Ask the operator to run /typesafe enable; do not enable it by editing configuration or environment files.");
-      const request = parseEvaluationRequest(params);
+      // The tool admits through the same rule as the library; evaluate() re-runs it idempotently.
+      const request = prepareEvaluationRequest(params);
       const result = await getClient().evaluate(request, signal ? { signal } : {});
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
     },
@@ -93,8 +93,11 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
       try {
         if (action === "status") {
           const usage = client?.getUsage();
-          const source = keySource();
-          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}; key ${source ? `from ${source === "stored" ? "/typesafe login" : "TYPESAFE_API_KEY"}` : "missing (run /typesafe login)"}; ${usage?.requestsStarted ?? 0}/20 attempts; ${usage?.requestsSucceeded ?? 0} successful; ${usage?.inputTokens ?? 0} input tokens. Model: jev-latest. Limits reset on session start/reload. ${disclosure}`);
+          const situation = keySituation();
+          const key = situation.kind === "missing" ? "missing (run /typesafe login)"
+            : situation.kind === "unusable" ? `unusable (${situation.reason})`
+            : `from ${keySourceLabel(situation)}`;
+          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}; key ${key}; ${usage?.requestsStarted ?? 0}/${DEFAULT_MAX_REQUESTS} attempts; ${usage?.requestsSucceeded ?? 0} successful; ${usage?.inputTokens ?? 0} input tokens. Model: jev-latest. Limits reset on session start/reload. ${disclosure}`);
           return;
         }
         if (action === "logout") {
@@ -117,7 +120,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           report("This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and TYPESAFE_API_KEY before launching Pi.", "warning");
           return;
         }
-        if (action === "login" || (action === "setup" && !keySource())) {
+        const situation = keySituation();
+        if (action === "login" || (action === "setup" && situation.kind === "missing")) {
           if (process.env.TYPESAFE_API_KEY?.trim()) {
             report("TYPESAFE_API_KEY is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.", "warning");
             return;
@@ -129,14 +133,18 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           return;
         }
         if (action === "setup") {
-          report(`Key configured via ${keySource() === "stored" ? "/typesafe login" : "TYPESAFE_API_KEY"}. Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls.`);
+          const current = situation.kind === "environment" || situation.kind === "stored" ? `configured via ${keySourceLabel(situation)}`
+            : situation.kind === "unusable" ? `unusable — ${situation.reason}`
+            : "missing";
+          report(`Key ${current}. Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls.`);
           return;
         }
         if (action === "enable") {
-          if (!keySource()) { report("Run /typesafe login first: no API key is configured.", "warning"); return; }
+          if (situation.kind === "missing") { report("Run /typesafe login first: no API key is configured.", "warning"); return; }
+          if (situation.kind === "unusable") { report(`The stored key cannot be used. ${situation.reason}`, "warning"); return; }
           if (await ctx.ui.confirm("Enable TypeSafe for this session?", disclosure)) {
             enabled = true;
-            report("TypeSafe enabled. Up to 20 attempts in this session; /typesafe disable stops future agent calls.");
+            report(`TypeSafe enabled. Up to ${DEFAULT_MAX_REQUESTS} attempts in this session; /typesafe disable stops future agent calls.`);
           }
           return;
         }
@@ -146,7 +154,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           if (text === undefined) return;
           try { request = JSON.parse(text); } catch { report("Invalid JSON. Keep quoted strings on one line; nothing was sent.", "error"); return; }
         }
-        const validated = parseEvaluationRequest(normalizeEvaluationRequest(request));
+        const validated = prepareEvaluationRequest(request);
         if (!await ctx.ui.confirm("Send this TypeSafe request?", disclosure)) return;
         const result = await getClient().evaluate(validated);
         // Playground results stay out of LLM context; the agent tool returns its own results normally.

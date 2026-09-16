@@ -250,3 +250,16 @@ test("request data is snapshotted before asynchronous work", async () => {
   await result;
   assert.equal(sent?.state, "synthetic");
 });
+
+test("evaluate admits the same near-miss aliases as the agent tool", async () => {
+  let sentCriteria: unknown;
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { questions: Record<string, { criteria?: unknown }> };
+    sentCriteria = body.questions.yes?.criteria;
+    return responseFor(sample().questions);
+  } });
+  const nearMiss = { state: "synthetic", questions: { yes: { type: "noul", instructions: "Is this synthetic?", criteria: "Is this synthetic data?" } } };
+  const result = await client.evaluate(nearMiss as unknown as SystemOneRequest);
+  assert.equal((result.answers.yes as { noul: number }).noul, 0.9);
+  assert.deepEqual(sentCriteria, { true: "Is this synthetic data?" });
+});

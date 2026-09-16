@@ -1,8 +1,8 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
-import { resolveApiKey } from "./credentials.js";
+import { keySituation } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
-import { parseEvaluationRequest } from "./schema.js";
+import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationRequest } from "./schema.js";
 
 export interface TypeSafeOptions {
   /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
@@ -32,6 +32,9 @@ export interface TypeSafe {
   listModels(options?: EvaluationOptions): Promise<string[]>;
   getUsage(): UsageSnapshot;
 }
+
+/** Default attempts per client instance; the extension quotes the same number in its consent copy. */
+export const DEFAULT_MAX_REQUESTS = 20;
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -67,11 +70,16 @@ function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions:
 
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
-  const apiKey = options.apiKey?.trim() || resolveApiKey()?.key;
+  let apiKey = options.apiKey?.trim();
+  if (!apiKey) {
+    const situation = keySituation();
+    if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
+    if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
+  }
   if (!apiKey) throw new TypeSafeIntegrationError("configuration", "No TypeSafe API key. Run /typesafe login in Pi, or set TYPESAFE_API_KEY in the environment.");
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
-  const maxInputBytes = positiveInteger(options.maxInputBytes ?? 65_536, "maxInputBytes");
-  const maxRequests = positiveInteger(options.maxRequests ?? 20, "maxRequests");
+  const maxInputBytes = positiveInteger(options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES, "maxInputBytes");
+  const maxRequests = positiveInteger(options.maxRequests ?? DEFAULT_MAX_REQUESTS, "maxRequests");
   const model = options.model ?? "jev-latest";
   if (typeof model !== "string" || !model.trim() || model.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   // Do not inherit SDK debug logging or alternate destinations from the environment.
@@ -98,9 +106,9 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       }
     },
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
-      const validated = parseEvaluationRequest(input);
+      const validated = prepareEvaluationRequest(input, { maxInputBytes });
       const body = JSON.stringify({ ...validated, model: validated.model ?? model });
-      if (Buffer.byteLength(body, "utf8") > maxInputBytes) throw new TypeSafeIntegrationError("validation", `Evaluation exceeds the ${maxInputBytes}-byte input limit.`);
+      assertWithinByteLimit(body, maxInputBytes);
       if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
       if (usage.requestsStarted >= maxRequests) throw new TypeSafeIntegrationError("budget", `TypeSafe request limit reached (${maxRequests} attempts per client instance).`);
       // Snapshot before awaiting so later mutations cannot change the request or validation.

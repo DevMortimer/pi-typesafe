@@ -42,6 +42,9 @@ export const evaluationSchema = Type.Object({
   model: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
 }, { additionalProperties: false });
 
+/** Default UTF-8 JSON byte budget for one evaluation request; the tool and the client share it. */
+export const DEFAULT_MAX_INPUT_BYTES = 65_536;
+
 const usage = "Expected { state, questions: { <id>: { type: \"choice\", instructions, criteria: { label: description|null } } | { type: \"score\", instructions, criteria: [level0, level1, ...] } | { type: \"noul\", instructions } } }; 1–32 questions, Choice 1–64 options, Score 2–32 levels.";
 
 /** Paths and messages only; never the submitted values. */
@@ -55,7 +58,7 @@ function describeSchemaErrors(value: unknown): string {
   return details.join("; ");
 }
 
-/** Validate without including submitted content in validation errors. */
+/** Validate without including submitted content in validation errors. Prefer prepareEvaluationRequest(), which also accepts near-misses and enforces the byte budget. */
 export function parseEvaluationRequest(value: unknown): SystemOneRequest {
   if (value !== null && typeof value === "object" && !Array.isArray(value) && !isJsonSafe(value)) {
     throw new TypeSafeIntegrationError("validation", `Invalid evaluation request: state and questions must be plain JSON. ${usage}`);
@@ -96,7 +99,7 @@ function isJsonSafe(value: unknown): boolean {
   }
 }
 
-/** Accept common near-misses from language models without loosening the schema itself. */
+/** Accept common near-misses from language models without loosening the schema itself. Prefer prepareEvaluationRequest(), which applies this before validating. */
 export function normalizeEvaluationRequest(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const request = value as Record<string, unknown>;
@@ -120,4 +123,27 @@ export function normalizeEvaluationRequest(value: unknown): unknown {
     normalized[id] = item;
   }
   return { ...request, questions: normalized };
+}
+
+export interface PrepareEvaluationOptions {
+  /** UTF-8 JSON bytes of the serialized request. Default: DEFAULT_MAX_INPUT_BYTES. */
+  maxInputBytes?: number;
+}
+
+/** One byte rule for every limit check: measure the serialized request and name the configured limit. */
+export function assertWithinByteLimit(text: string, maxInputBytes: number): void {
+  if (Buffer.byteLength(text, "utf8") > maxInputBytes) {
+    throw new TypeSafeIntegrationError("validation", `Evaluation exceeds the ${maxInputBytes}-byte input limit.`);
+  }
+}
+
+/**
+ * The one admission rule: normalize known near-miss aliases, validate the schema and JSON-safety, then enforce the byte
+ * budget — always in that order. The Pi tool, the playground, and client.evaluate() all pass through here, so what one
+ * accepts the others accept.
+ */
+export function prepareEvaluationRequest(value: unknown, options: PrepareEvaluationOptions = {}): SystemOneRequest {
+  const validated = parseEvaluationRequest(normalizeEvaluationRequest(value));
+  assertWithinByteLimit(JSON.stringify(validated), options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES);
+  return validated;
 }

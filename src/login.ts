@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createTypeSafe } from "./client.js";
-import { normalizeApiKey, resolveApiKey, storeApiKey } from "./credentials.js";
+import { keySituation, normalizeApiKey, storeApiKey } from "./credentials.js";
 import type { KeySource } from "./credentials.js";
 import { TypeSafeIntegrationError } from "./errors.js";
 import { promptForApiKey } from "./key-prompt.js";
@@ -36,10 +36,15 @@ export type EnsureApiKeyResult =
   | { source: KeySource; login?: undefined }
   | { source: "stored"; login: LoginResult };
 
-/** Use the configured key if there is one; otherwise run the login prompt. Undefined means the user cancelled. */
+/**
+ * Use the configured key if there is one; otherwise run the login prompt. `undefined` means the user cancelled.
+ * A store that must not be read throws `configuration` with the reason instead of prompting, so a permissions
+ * problem stays visible; the result shape is frozen for existing callers.
+ */
 export async function ensureApiKey(ctx: ExtensionCommandContext): Promise<EnsureApiKeyResult | undefined> {
-  const existing = resolveApiKey();
-  if (existing) return { source: existing.source };
+  const situation = keySituation();
+  if (situation.kind === "environment" || situation.kind === "stored") return { source: situation.kind };
+  if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
   const login = await loginWithPrompt(ctx);
   return login ? { source: "stored", login } : undefined;
 }

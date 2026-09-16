@@ -208,3 +208,19 @@ test("new sessions reset opt-in; headless opt-in is explicit", async () => {
   await runCommand("status");
   assert.ok(notices.at(-1)?.includes("1/20 attempts"));
 });
+
+test("the registered tool admits the same near-miss aliases as the library", async () => {
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start");
+  for (const handler of handlers ?? []) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  const before = networkCalls;
+  const result = await Reflect.apply(tool.definition.execute, tool.definition, [
+    "test-call",
+    { state: "synthetic", questions: { yes: { type: "noul", instructions: "Is this synthetic?", criteria: "Is this synthetic data?" } } },
+    undefined,
+    undefined,
+    ctx,
+  ]);
+  assert.equal(networkCalls, before + 1);
+  assert.equal(result.details.answers.yes.noul, 0.9);
+});
