@@ -10,7 +10,8 @@ try {
 } catch {
   // No .env present; the stored key from /typesafe login (if any) is used.
 }
-const child = spawn('pi', ['-e', root, ...process.argv.slice(2)], {
+// --no-extensions keeps an installed pi-typesafe (or other extensions) from loading alongside the working tree.
+const child = spawn('pi', ['--no-extensions', '-e', root, ...process.argv.slice(2)], {
   cwd: root,
   env: process.env,
   stdio: 'inherit',

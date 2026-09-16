@@ -115,7 +115,7 @@ npm install
 npm run check        # typecheck, offline tests, build
 cp .env.example .env # add your key locally; .env is git-ignored
 npm run test:live    # one billable sample request
-npm run dev:pi       # start Pi with this package loaded from the working tree (.env optional)
+npm run dev:pi       # start Pi with only this working tree as extension (.env optional)
 ```
 
 ## License
