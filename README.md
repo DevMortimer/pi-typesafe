@@ -61,6 +61,18 @@ The tool accepts JSON `state` plus 1–32 questions and returns answers, model, 
 
 Read probabilities and confidence alongside the answer. Confidence describes how concentrated the distribution is; it is not proof of correctness or permission to act.
 
+## Writing questions that work
+
+The question text is the whole program. Jev answers exactly what is asked, so ambiguity shows up as a middling probability rather than an error.
+
+- **Ask about what the state says, not what you would conclude.** A report that says "happens every time" scored `P(yes) = 0.36` for `Is the bug reproducible from the text?` because that can also mean "could a reader reproduce it using only this text?". `Does the reporter state that the problem occurs consistently?` is the intended question.
+- **Describe situations in Score levels, not degrees.** `"Workaround exists"` is checkable; `"medium"` is not.
+- **Include a no-match option** in a Choice (`other`, `unclear`) when nothing may fit; the model cannot pick an option you omitted.
+- **One judgment per question.** Split independent dimensions into separate questions and batch them in one request; they run in parallel and cannot see each other.
+- **Name the state fields you mean** with backticks (`` `report.body` ``) when the state has several parts.
+
+The [TypeSafe docs](https://docs.typesafe.ai/primitives) cover each primitive in detail.
+
 ## Data handling and limits
 
 - Only the state and questions you (or the agent, once enabled) submit are sent, to `https://api.typesafe.ai` only. No files, conversation history, or telemetry are collected.
