@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "TypeSafe decisions for Pi: a batched evaluation tool, terminal playground, and typed API for extension authors.",
   "type": "module",
   "license": "MIT",
@@ -43,7 +43,8 @@
   "pi": {
     "extensions": [
       "./extensions/index.js"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/DevMortimer/pi-typesafe/main/docs/preview.png"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
