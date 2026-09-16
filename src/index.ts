@@ -1,6 +1,6 @@
 export { createTypeSafe } from "./client.js";
 export type { TypeSafe, TypeSafeOptions, EvaluationOptions, Evaluation, UsageSnapshot } from "./client.js";
-export { credentialsPath, resolveApiKey } from "./credentials.js";
+export { clearStoredApiKey, credentialsPath, normalizeApiKey, resolveApiKey, storeApiKey } from "./credentials.js";
 export type { KeySource } from "./credentials.js";
 export { TypeSafeIntegrationError } from "./errors.js";
 export type { IntegrationErrorCode } from "./errors.js";

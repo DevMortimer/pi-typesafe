@@ -4,9 +4,9 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
 import { createTypeSafe } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
-import { clearStoredApiKey, credentialsPath, normalizeApiKey, resolveApiKey, storeApiKey } from "./credentials.js";
+import { clearStoredApiKey, credentialsPath, resolveApiKey } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
-import { promptForApiKey } from "./key-prompt.js";
+import { loginWithPrompt } from "./login.js";
 import { evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest } from "./schema.js";
 
 const disclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
@@ -122,14 +122,10 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
             report("TYPESAFE_API_KEY is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.", "warning");
             return;
           }
-          const entered = await promptForApiKey(ctx);
-          if (entered === undefined) { report("Login cancelled; nothing was saved."); return; }
-          const key = normalizeApiKey(entered);
-          // Verify with a model listing before saving so a bad paste fails here, not on first use.
-          const models = await createTypeSafe({ apiKey: key }).listModels();
-          const path = storeApiKey(key);
+          const login = await loginWithPrompt(ctx);
+          if (login === undefined) { report("Login cancelled; nothing was saved."); return; }
           client = undefined;
-          report(`Key verified (${models.length} model${models.length === 1 ? "" : "s"} available) and saved to ${path} with owner-only permissions. Run /typesafe enable to allow agent tool calls.`);
+          report(`Key verified (${login.models} model${login.models === 1 ? "" : "s"} available) and saved to ${login.path} with owner-only permissions. Run /typesafe enable to allow agent tool calls.`);
           return;
         }
         if (action === "setup") {
