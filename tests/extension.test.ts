@@ -83,6 +83,8 @@ test("Pi loads a tool, a slash command, and a result renderer without network ca
   assert.equal(tool.definition.name, "typesafe_evaluate");
   const completions = await command.getArgumentCompletions?.("pla");
   assert.ok(completions?.some(item => item.value === "playground"));
+  assert.ok(tool.definition.promptGuidelines?.some(text => /one question per item per dimension/.test(text)));
+  assert.ok(/named state field/.test(tool.definition.description));
 });
 
 test("default-disabled tool cannot submit data", async () => {
