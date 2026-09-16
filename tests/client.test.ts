@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createTypeSafe, choice, noul, score, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
+import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
 import type { Questions, SystemOneRequest } from "../src/index.js";
 
 export function responseFor(questions: Questions): Response {
@@ -90,6 +90,47 @@ test("invalid questions are rejected before network submission without echoing s
   }
   assert.equal(calls, 0);
   assert.equal(client.getUsage().requestsStarted, 0);
+});
+
+test("validation errors name the offending path, never the submitted value", () => {
+  const secret = "private-user-content";
+  const cases: Array<[unknown, RegExp]> = [
+    [{ state: secret, questions: { q: { type: "choice", instructions: secret, criteria: ["a", 1] } } }, /questions\.q/],
+    [{ state: secret, questions: { q: { type: "score", criteria: [secret] } } }, /questions\.q/],
+    [{ state: secret, questions: {} }, /questions/],
+    [{ state: secret }, /questions|request/],
+    [{ state: secret, questions: { q: noul("ok") }, extra: secret }, /extra/],
+  ];
+  for (const [request, path] of cases) {
+    assert.throws(() => parseEvaluationRequest(request), (error: unknown) => {
+      assert.ok(error instanceof TypeSafeIntegrationError);
+      assert.match(error.message, path);
+      assert.match(error.message, /Expected \{ state, questions/);
+      assert.equal(error.message.includes(secret), false);
+      return true;
+    });
+  }
+});
+
+test("normalization accepts common model near-misses without loosening the schema", () => {
+  const normalized = normalizeEvaluationRequest({
+    state: "s",
+    questions: {
+      team: { type: "choice", instructions: "Which team?", options: ["frontend", "backend"] },
+      level: { type: "score", instructions: "How bad?", levels: ["fine", "bad"] },
+      flag: { type: "noul", instructions: "Is it?", criteria: "Yes when stated" },
+      keep: choice("Already valid", { a: "A", b: null }),
+    },
+  });
+  const request = parseEvaluationRequest(normalized);
+  assert.deepEqual(request.questions.team, { type: "choice", instructions: "Which team?", criteria: { frontend: null, backend: null } });
+  assert.deepEqual(request.questions.level, { type: "score", instructions: "How bad?", criteria: ["fine", "bad"] });
+  assert.deepEqual(request.questions.flag, { type: "noul", instructions: "Is it?", criteria: { true: "Yes when stated" } });
+  assert.deepEqual(request.questions.keep, JSON.parse(JSON.stringify(choice("Already valid", { a: "A", b: null }))));
+  for (const value of [null, "text", [], { questions: [] }, { questions: { q: "text" } }]) {
+    assert.deepEqual(normalizeEvaluationRequest(value), value);
+  }
+  assert.throws(() => parseEvaluationRequest(normalizeEvaluationRequest({ state: "s", questions: { q: { type: "choice", options: ["a", 2] } } })), (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "validation");
 });
 
 test("non-JSON state, getters, cycles, and excessive nesting are rejected", () => {

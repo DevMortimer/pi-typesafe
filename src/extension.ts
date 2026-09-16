@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Static } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
 import { createTypeSafe } from "./client.js";
@@ -6,7 +7,7 @@ import type { Evaluation, TypeSafe } from "./client.js";
 import { clearStoredApiKey, credentialsPath, normalizeApiKey, resolveApiKey, storeApiKey } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { promptForApiKey } from "./key-prompt.js";
-import { evaluationSchema, parseEvaluationRequest } from "./schema.js";
+import { evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest } from "./schema.js";
 
 const disclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
 const sample = {
@@ -58,6 +59,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
       "Report typesafe_evaluate answers as the model's judgments with their probabilities; do not replace them with your own guesses, and say when an answer is uncertain.",
     ],
     parameters: evaluationSchema,
+    // Pi validates against `parameters` after this hook; the cast only names the schema's type.
+    prepareArguments: args => normalizeEvaluationRequest(args) as Static<typeof evaluationSchema>,
     async execute(_id, params, signal) {
       if (!enabled) throw new TypeSafeIntegrationError("configuration", "TypeSafe is disabled. Ask the operator to run /typesafe enable; do not enable it by editing configuration or environment files.");
       const request = parseEvaluationRequest(params);
@@ -147,7 +150,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           if (text === undefined) return;
           try { request = JSON.parse(text); } catch { report("Invalid JSON. Keep quoted strings on one line; nothing was sent.", "error"); return; }
         }
-        const validated = parseEvaluationRequest(request);
+        const validated = parseEvaluationRequest(normalizeEvaluationRequest(request));
         if (!await ctx.ui.confirm("Send this TypeSafe request?", disclosure)) return;
         const result = await getClient().evaluate(validated);
         // Playground results stay out of LLM context; the agent tool returns its own results normally.
