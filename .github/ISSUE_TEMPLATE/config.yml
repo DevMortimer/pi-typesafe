@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question
+    url: https://github.com/DevMortimer/pi-typesafe/discussions
+    about: How to write a question Jev answers well, or whether pi-typesafe fits what you are building.
+  - name: Security report
+    url: https://github.com/DevMortimer/pi-typesafe/security/advisories/new
+    about: A way to expose a key, an upstream response body, or submitted content. Private, please.

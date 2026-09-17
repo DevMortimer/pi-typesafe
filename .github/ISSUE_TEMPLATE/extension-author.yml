@@ -1,0 +1,29 @@
+name: Extension author request
+description: You are building a Pi extension on pi-typesafe and the client does not let you do something.
+title: "[api] "
+labels: ["extension-authors"]
+body:
+  - type: textarea
+    id: building
+    attributes:
+      label: What you are building
+      description: One paragraph, and a link if it is public.
+    validations:
+      required: true
+  - type: textarea
+    id: blocked
+    attributes:
+      label: What you cannot do today
+      description: The call you tried to make and what happened, or the export you looked for in `src/index.ts` and did not find.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The smallest API that would work for you
+      description: A signature or an option name is enough. Say whether it must be stable before you can depend on it.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "pi-typesafe 0.4.0, pi 0.85.1"

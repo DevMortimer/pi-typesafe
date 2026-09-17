@@ -1,0 +1,39 @@
+name: Bug
+description: A crash, a login that does not stick, a request that fails or returns something wrong, a command that misbehaves.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Smallest sequence that reproduces it
+      description: Commands and prompts in order. A fresh `pi` with only pi-typesafe loaded is ideal.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: "`/typesafe status` output"
+      description: Names the key source, consent, and usage; contains no key.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error text
+      description: Exactly as Pi showed it. pi-typesafe errors carry a code (configuration, network, http, budget, validation) and never a response body; if you see one, that is itself a bug.
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and platform
+      placeholder: "pi-typesafe 0.4.0, pi 0.85.1, macOS 15 / node 22"
+    validations:
+      required: true
