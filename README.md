@@ -1,10 +1,10 @@
 # pi-typesafe
 
-[Jev](https://typesafe.ai) inside [Pi](https://pi.dev). Jev is TypeSafe's judgment model: you give it some state and typed questions, and it returns probabilities instead of prose, in well under a second, for a fraction of a cent. This package gives Pi three things built on it:
+[Jev](https://typesafe.ai) inside [Pi](https://pi.dev). Jev is TypeSafe's judgment model: send it some state and typed questions and it returns probabilities instead of prose, in well under a second, for a fraction of a cent. This package gives Pi three things built on it:
 
-- **A tool for the agent.** `typesafe_evaluate` lets Pi's main model hand off small structured judgments (classify, triage, compare, score) and get calibrated numbers back, in one batched call.
-- **A playground.** `/typesafe playground` and `/typesafe test` run requests from the terminal without touching the model's context.
-- **A typed API for other extensions.** One client, one key store, one login prompt, so extensions such as [pi-warden](https://github.com/DevMortimer/pi-warden) do not each ask for a key.
+- **A tool for the agent.** `typesafe_evaluate` hands small structured judgments (classify, triage, compare, score) to Jev and returns calibrated numbers in one batched call.
+- **A playground.** `/typesafe test` and `/typesafe playground` run requests from the terminal without touching the model's context.
+- **A typed API for other extensions.** One client, one key store, one login prompt, so extensions such as [pi-warden](https://github.com/DevMortimer/pi-warden) do not each ask for a key — and so a long run can tell you whether Jev was reachable and what it cost.
 
 ![Pi triaging three bug reports with one batched TypeSafe call: the prompt, the rendered TypeSafe answers, and the agent's verdict](https://raw.githubusercontent.com/DevMortimer/pi-typesafe/main/docs/preview.png)
 
@@ -26,15 +26,13 @@ Requires Pi 0.85 or newer and Node.js 22.19 or newer. Usage is billed to your Ty
 
 ## The three question types
 
-Jev answers three kinds of question about the state you send. Every question in a request is evaluated in parallel and in isolation, so adding questions barely changes the latency.
+Jev answers three kinds of question about the state you send. Every question in a request runs in parallel and in isolation, so adding questions barely changes the latency.
 
 | Type | Asks | Returns |
 | --- | --- | --- |
 | **Choice** | Which of these options fits? | the chosen key, a probability per option, confidence |
 | **Score** | Where on this ordered rubric does it sit? | a position (may be fractional), probabilities, confidence |
 | **Noul** | Is this statement true? | a probability from 0 to 1 |
-
-Example request the agent could send about a support message:
 
 ```json
 {
@@ -69,6 +67,24 @@ The question text is the whole program. Jev answers exactly what is asked, so am
 
 The [TypeSafe docs](https://docs.typesafe.ai/primitives) cover each primitive in detail.
 
+## Availability and spend
+
+An enabled extension with no usable key looks exactly like a working one — one evaluation ran keyless for hours before anyone noticed. Three answers exist now, and `/typesafe status` prints all of them:
+
+- **Is Jev reachable?** `authState()` reports the key source, whether it has been accepted, and the last failure that degraded it; `describeAuth()` turns that into a level and one safe line. The extension calls both at session start and after an authentication rejection, so a headless run says judgments are skipped instead of quietly falling back to its offline path.
+- **What has this run cost?** `getSpend()` returns session counters, today's persisted counters, and the cap currently reached. Cost is estimated from input tokens only, because output is free.
+- **When does it stop?** `maxRequests` bounds a client instance. Three caps bound a local day, survive restarts, and stop a request before it is submitted:
+
+| Option | Environment | Bounds |
+| --- | --- | --- |
+| `maxRequestsPerDay` | `PI_TYPESAFE_MAX_REQUESTS_PER_DAY` | requests |
+| `maxInputTokensPerDay` | `PI_TYPESAFE_MAX_INPUT_TOKENS_PER_DAY` | input tokens |
+| `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | estimated spend |
+
+The environment may lower an explicit cap but never raise it. A reached cap raises a `budget` error naming the cap, the amount used, and the day.
+
+Need more than one request? `evaluateAll(request)` asks any number of questions about one state (over 32 are chunked and fanned out), and `evaluateMany(requests)` runs several requests at once. Both preserve order, bound concurrency, never throw, and stop submitting once the budget is gone. [`pi-typesafe/calibrate`](docs/api.md#calibration-pi-typesafecalibrate) turns labelled cases into thresholds with AUC, a sweep, and a replay runner.
+
 ## Commands
 
 | Command | Effect |
@@ -76,7 +92,7 @@ The [TypeSafe docs](https://docs.typesafe.ai/primitives) cover each primitive in
 | `/typesafe login` | Enter and verify an API key (hidden input), then store it |
 | `/typesafe logout` | Delete the stored key and disable the tool |
 | `/typesafe setup` | Check which key is in use; starts login if none |
-| `/typesafe status` | Opt-in state, attempts used, token totals |
+| `/typesafe status` | Opt-in state, key state, session and today's counters, cost estimate, any reached cap |
 | `/typesafe enable` | Confirm the data notice and allow agent tool calls this session |
 | `/typesafe disable` | Stop future agent tool calls |
 | `/typesafe test` | Send one built-in sample request |
@@ -90,52 +106,37 @@ Playground and test results are shown in the terminal only; they do not enter th
 Install works without one; nothing is sent until you log in and enable the tool. Jev is new and access may be limited at the moment. Keys come from [console.typesafe.ai](https://console.typesafe.ai).
 
 **What does a request cost?**
-Whatever TypeSafe bills for the input tokens of your state and questions; output is free. At the listed rate ($42 per billion input tokens at the time of writing) a typical request of a few hundred tokens costs well under a hundredth of a cent. The per-session cap is 20 attempts; `/typesafe status` shows the totals.
+Whatever TypeSafe bills for the input tokens of your state and questions; output is free. At the listed rate ($42 per billion input tokens at the time of writing) a few hundred tokens cost well under a hundredth of a cent. The per-session cap is 20 attempts, and `maxUsdPerDay` stops a long run at a number you choose.
 
 **Why not just ask the main model?**
-The main model can answer any of these questions in prose. It is slower, costs more per call, and grades its own work. Jev returns a calibrated number your code or the agent can branch on, in a quarter of a second, from a separate model. That matters most when the same question is asked many times (every tool call, every file, every issue in a list).
+The main model can answer any of these questions in prose. It is slower, costs more per call, and grades its own work. Jev returns a calibrated number your code or the agent can branch on, in a quarter of a second, from a separate model. That matters most when the same question is asked many times: every tool call, every file, every issue in a list.
 
 **What is sent?**
-Only the state and questions you (or the agent, once enabled) submit, to `https://api.typesafe.ai` only. No files, conversation history, or telemetry are collected. Error messages never include upstream response bodies, headers, keys, or your submitted state.
+Only the state and questions you (or the agent, once enabled) submit, to `https://api.typesafe.ai` only. No files, conversation history, or telemetry. Error messages never include upstream response bodies, headers, keys, or your submitted state.
 
 **Limits?**
-Per request: 32 questions and 64 KiB of JSON. Per session: 20 attempts, 15-second timeout, no automatic retries. Limits reset when a session starts or reloads. The SDK's `TYPESAFE_BASE_URL` and `TYPESAFE_LOG_LEVEL` overrides are ignored.
+Per request: 32 questions and 64 KiB of JSON. Per session: 20 attempts, 15-second timeout, no automatic retries. Per day: no cap unless you set one. Session limits reset when a session starts or reloads; daily counters live in `~/.pi/agent/pi-typesafe/usage.json` and roll over at local midnight. The SDK's `TYPESAFE_BASE_URL` and `TYPESAFE_LOG_LEVEL` overrides are ignored.
 
 ## For extension authors
 
-Import the library from your own extension. It has no dependency on Pi and is safe to use in tests.
+Import the library from your own extension. It has no dependency on Pi and is safe in tests.
 
 ```ts
-import { createTypeSafe, choice, noul, score } from "pi-typesafe";
+import { ask, createTypeSafe, choice, noul, score } from "pi-typesafe";
 
-const typesafe = createTypeSafe({ maxRequests: 5 });       // key: TYPESAFE_API_KEY, else the /typesafe login store
-const result = await typesafe.evaluate({
+const typesafe = createTypeSafe({ maxRequests: 5, maxUsdPerDay: 1 });  // key: TYPESAFE_API_KEY, else the login store
+const answer = await ask(typesafe, {
   state: { title: "Login fails after update", body: "..." },
   questions: {
     area: choice("Which area does this report concern?", { auth: "Sign-in", ui: "Layout", other: null }),
     duplicate: noul("Does the report describe the same defect as `known_issue`?"),
     severity: score("How severe is the defect?", ["Cosmetic", "Workaround exists", "Blocking"]),
   },
-});
-result.answers.area.choice;        // "auth" | "ui" | "other"
-result.answers.duplicate.noul;     // 0..1
-result.answers.severity.score;     // 0..2, may be fractional
-result.usage, result.elapsedMs, typesafe.getUsage();
+}, { timeoutMs: 5_000 });
+if (!answer.ok) return { skipped: answer.errorCode === "budget" };  // never throws
 ```
 
-| Export | Purpose |
-| --- | --- |
-| `createTypeSafe(options)` | Client. Options: `apiKey`, `model` (default `jev-latest`), `timeoutMs`, `maxInputBytes`, `maxRequests`, `fetch` (inject a transport for offline tests). |
-| `evaluate(request, { signal })` | Validates before sending; rejects with `TypeSafeIntegrationError` (`code`: `configuration`, `validation`, `budget`, `aborted`, `timeout`, `http`, `connection`, `response`). |
-| `prepareEvaluationRequest(value, { maxInputBytes })` | The admission rule as a function: normalizes the near-miss aliases the agent tool accepts (`options`/`levels`/`choices`, a string Noul criterion, a label array), validates, then enforces the byte budget. `DEFAULT_MAX_INPUT_BYTES` and `DEFAULT_MAX_REQUESTS` hold the shared defaults. |
-| `listModels()` | Verifies the key with a GET request that does not count toward `maxRequests`. |
-| `resolveApiKey()`, `ensureApiKey()` | Report whether a key comes from the environment or the login store without your extension handling the value. Frozen for existing callers. |
-| `keySituation()`, `keySourceLabel(situation)` | The same answer without throwing: `{ kind: "environment" \| "stored" \| "missing" \| "unusable", key?, path?, reason? }`, plus a label for the source. |
-| `credentialsPath()`, `storeApiKey(value)`, `clearStoredApiKey()` | Where the key lives and how to manage the owner-only store. |
-| `evaluationSchema`, `parseEvaluationRequest` | TypeBox schema and parser for tools that accept request JSON. |
-| `pi-typesafe/ui`: `ensureApiKey(ctx)`, `loginWithPrompt`, `promptForApiKey` | The same hidden-input login as `/typesafe login` for your own command. `ensureApiKey(ctx)` returns the existing key source or prompts, verifies, and stores a new key (undefined when the user cancels). Needs Pi's TUI, so use it only inside extension command handlers. |
-
-Your extension owns its own user consent and budget; `/typesafe enable` applies only to this package's tool. See [`examples/decision-extension.ts`](examples/decision-extension.ts), and [pi-warden](https://github.com/DevMortimer/pi-warden) for a full extension built this way.
+Your extension owns its own user consent and budget; `/typesafe enable` applies only to this package's tool. Check `authState()` rather than your own consent flag before you report that judgments are on. Every export — the client, `ask`, batching, the usage ledger, auth state, and the `pi-typesafe/calibrate` and `pi-typesafe/ui` entry points — is in [docs/api.md](docs/api.md).
 
 ## Development
 

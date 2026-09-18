@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "TypeSafe AI (Jev) decisions for Pi: batched Choice/Score/Noul evaluation tool, terminal playground, and a typed API other extensions build on.",
   "type": "module",
   "license": "MIT",
@@ -34,6 +34,10 @@
     "./ui": {
       "types": "./dist/ui.d.ts",
       "import": "./dist/ui.js"
+    },
+    "./calibrate": {
+      "types": "./dist/calibrate.d.ts",
+      "import": "./dist/calibrate.js"
     },
     "./package.json": "./package.json"
   },

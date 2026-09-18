@@ -57,7 +57,11 @@ test("official SDK helpers, typed answers, metadata, and one batched network cal
   assert.equal(value, 0);
   assert.equal(calls, 1);
   assert.ok(result.elapsedMs >= 0);
-  assert.deepEqual(client.getUsage(), { requestsStarted: 1, requestsSucceeded: 1, inputTokens: 42, outputTokens: 0 });
+  assert.deepEqual(client.getUsage(), { requestsStarted: 1, requestsSucceeded: 1, requestsFailed: 0, inputTokens: 42, outputTokens: 0, estimatedUsd: 0.000002 });
+  const spend = client.getSpend();
+  assert.equal(spend.session.requestsStarted, 1);
+  assert.equal(spend.today.inputTokens, 42);
+  assert.equal(spend.blocked, undefined);
 });
 
 test("structured state, descriptions, and null values are supported", () => {

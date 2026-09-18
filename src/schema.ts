@@ -3,6 +3,12 @@ import { Type } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { TypeSafeIntegrationError } from "./errors.js";
 
+/** Default UTF-8 JSON byte budget for one evaluation request; the tool and the client share it. */
+export const DEFAULT_MAX_INPUT_BYTES = 65_536;
+
+/** Questions one request may ask. More than this needs `chunkEvaluationRequest`, which splits and fans out. */
+export const DEFAULT_MAX_QUESTIONS = 32;
+
 // The API accepts structured descriptions, not only strings.
 const entry = Type.Union([
   Type.String(),
@@ -37,15 +43,12 @@ export const evaluationSchema = Type.Object({
   state: entry,
   questions: Type.Record(Type.String({ minLength: 1, maxLength: 100 }), question, {
     minProperties: 1,
-    maxProperties: 32,
+    maxProperties: DEFAULT_MAX_QUESTIONS,
   }),
   model: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
 }, { additionalProperties: false });
 
-/** Default UTF-8 JSON byte budget for one evaluation request; the tool and the client share it. */
-export const DEFAULT_MAX_INPUT_BYTES = 65_536;
-
-const usage = "Expected { state, questions: { <id>: { type: \"choice\", instructions, criteria: { label: description|null } } | { type: \"score\", instructions, criteria: [level0, level1, ...] } | { type: \"noul\", instructions } } }; 1–32 questions, Choice 1–64 options, Score 2–32 levels.";
+const usage = `Expected { state, questions: { <id>: { type: "choice", instructions, criteria: { label: description|null } } | { type: "score", instructions, criteria: [level0, level1, ...] } | { type: "noul", instructions } } }; 1–${DEFAULT_MAX_QUESTIONS} questions, Choice 1–64 options, Score 2–32 levels.`;
 
 /** Paths and messages only; never the submitted values. */
 function describeSchemaErrors(value: unknown): string {
