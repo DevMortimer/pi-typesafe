@@ -16,12 +16,12 @@ pi-typesafe is the TypeSafe client other Pi extensions build on: key storage, co
 
 ## Rules the code keeps
 
-- **The public API is `src/index.ts`.** Adding an export needs a line in the README's "For extension authors" section; removing or changing one needs a minor version bump until 1.0 and a note in the release.
+- **The public API is `src/index.ts`.** Adding an export needs a line in [docs/api.md](docs/api.md); removing or changing one needs a minor version bump until 1.0 and a note in the release.
 - **No new runtime dependencies without a reason in the PR.** Today: `@typesafe-ai/sdk` and `typebox`.
 - **Nothing from upstream reaches the user unvalidated.** Responses are checked against the questions before a caller sees them; an invalid response is an error, never a partial answer.
 - **Errors carry a code and a safe message.** Never a response body, never the key, never the submitted state.
 - **Keys are owner-only and never returned.** `resolveApiKey` tells you where a key came from, not what it is.
-- **Consent and budget are enforced here, not in callers.** `maxRequests` counts attempts, including failures; a caller cannot exceed it by retrying.
+- **Consent and budget are enforced here, not in callers.** `maxRequests` counts attempts, including failures; a caller cannot exceed it by retrying. Daily caps live in the same client so a script cannot opt out by forgetting them.
 
 ## Commits and pull requests
 
