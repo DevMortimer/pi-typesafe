@@ -95,7 +95,7 @@ test("default-disabled tool cannot submit data", async () => {
 test("setup and status never display the API key", async () => {
   await runCommand("setup");
   await runCommand("status");
-  assert.ok(notices.some(text => text.includes("key from TYPESAFE_API_KEY")));
+  assert.ok(notices.some(text => text.includes("TypeSafe key: TYPESAFE_API_KEY")));
   assert.equal(notices.some(text => text.includes("offline-test-key")), false);
 });
 
@@ -180,7 +180,7 @@ test("login verifies, stores with owner-only permissions, and never echoes the k
   assert.equal(notices.some(text => text.includes("ts_live_key")), false);
   assert.equal(statSync(storedPath).mode & 0o777, 0o600);
   await runCommand("status");
-  assert.ok(notices.at(-1)?.includes("key from /typesafe login"));
+  assert.ok(notices.at(-1)?.includes("TypeSafe key: /typesafe login"));
   await runCommand("setup");
   assert.ok(notices.at(-1)?.includes("configured via /typesafe login"));
   // The stored key powers the real tool after consent.
@@ -192,7 +192,7 @@ test("login verifies, stores with owner-only permissions, and never echoes the k
   assert.equal(existsSync(storedPath), false);
   await assert.rejects(runTool(), /disabled/);
   await runCommand("status");
-  assert.ok(notices.at(-1)?.includes("key missing"));
+  assert.ok(notices.at(-1)?.includes("TypeSafe key: missing"));
   process.env.TYPESAFE_API_KEY = "offline-test-key";
 });
 
@@ -207,6 +207,43 @@ test("new sessions reset opt-in; headless opt-in is explicit", async () => {
   assert.equal(networkCalls, 3);
   await runCommand("status");
   assert.ok(notices.at(-1)?.includes("1/20 attempts"));
+});
+
+test("an enabled session with no key announces that judgments are skipped", async () => {
+  delete process.env.TYPESAFE_API_KEY;
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  const before = notices.length;
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  const said = notices.slice(before).join("\n");
+  assert.ok(said.includes("judgments are skipped"));
+  assert.ok(said.includes("TypeSafe key: missing"));
+  // A key that appears later silences the next startup notice.
+  process.env.TYPESAFE_API_KEY = "offline-test-key";
+  const again = notices.length;
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "reload" }, ctx]);
+  assert.equal(notices.slice(again).some(text => text.includes("judgments are skipped")), false);
+});
+
+test("a rejected key is called out once per session and shows up in status", async () => {
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  const before = notices.length;
+  const offlineStub = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ error: { message: "invalid key" } }, { status: 401 });
+  try {
+    await assert.rejects(runTool(), /HTTP 401/);
+    await assert.rejects(runTool(), /HTTP 401/);
+  } finally {
+    globalThis.fetch = offlineStub;
+  }
+  // Two failed calls, one callout: the reason is loud once, not once per call.
+  assert.equal(notices.slice(before).filter(text => text.includes("not authenticated")).length, 1);
+  await runCommand("status");
+  assert.ok(notices.at(-1)?.includes("was rejected"));
+  assert.ok(notices.at(-1)?.includes("Today "));
+  assert.ok(notices.at(-1)?.includes("failed"));
 });
 
 test("the registered tool admits the same near-miss aliases as the library", async () => {

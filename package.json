@@ -35,6 +35,10 @@
       "types": "./dist/ui.d.ts",
       "import": "./dist/ui.js"
     },
+    "./calibrate": {
+      "types": "./dist/calibrate.d.ts",
+      "import": "./dist/calibrate.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

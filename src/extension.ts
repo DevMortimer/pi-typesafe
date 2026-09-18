@@ -1,9 +1,10 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
 import { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
+import { authState, clearAuthState, describeAuth } from "./auth.js";
 import { clearStoredApiKey, credentialsPath, keySituation, keySourceLabel } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { loginWithPrompt } from "./login.js";
@@ -37,11 +38,28 @@ function format(result: Evaluation<Questions>, expanded = false): string {
 export default function typesafeExtension(pi: ExtensionAPI): void {
   let enabled = process.env.PI_TYPESAFE_ENABLED === "1";
   let client: TypeSafe | undefined;
+  // One callout per distinct degradation per session: a long run must not bury the reason in repeated notices.
+  let calledOut: string | undefined;
   const getClient = () => client ??= createTypeSafe();
+  const callOut = (ctx: ExtensionContext | undefined, key: string, text: string) => {
+    if (calledOut === key) return;
+    calledOut = key;
+    try {
+      if (ctx?.hasUI) ctx.ui.notify(text, "warning");
+      else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
+    } catch {
+      // Reporting must never replace the failure it describes, and a headless run may have no message channel.
+    }
+  };
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     enabled = process.env.PI_TYPESAFE_ENABLED === "1";
     client = undefined;
+    calledOut = undefined;
+    // An enabled extension with no usable key used to look exactly like a working one. Say it at startup; an
+    // unverified-but-present key stays quiet, because the first request is what proves it.
+    const auth = describeAuth(authState());
+    if (enabled && auth.level === "error") callOut(ctx, `start:${auth.level}`, `TypeSafe is enabled but judgments are skipped. ${auth.text}`);
   });
 
   pi.registerEntryRenderer<Evaluation<Questions>>("typesafe-result", (entry, { expanded }) => new Text(entry.data ? format(entry.data, expanded) : "TypeSafe · no result", 0, 0));
@@ -60,12 +78,22 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     parameters: evaluationSchema,
     // Pi validates against `parameters` after this hook; the cast only names the schema's type.
     prepareArguments: args => normalizeEvaluationRequest(args) as Static<typeof evaluationSchema>,
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<Evaluation<Questions>>> {
       if (!enabled) throw new TypeSafeIntegrationError("configuration", "TypeSafe is disabled. Ask the operator to run /typesafe enable; do not enable it by editing configuration or environment files.");
       // The tool admits through the same rule as the library; evaluate() re-runs it idempotently.
       const request = prepareEvaluationRequest(params);
-      const result = await getClient().evaluate(request, signal ? { signal } : {});
-      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      try {
+        const result = await getClient().evaluate(request, signal ? { signal } : {});
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      } catch (error) {
+        const safe = safeError(error);
+        // Authentication degradation is louder than a single failed call: it means every later judgment is skipped.
+        const rejected = safe.code === "http" && (safe.status === 401 || safe.status === 403);
+        if (rejected || safe.code === "configuration") {
+          callOut(ctx, `run:${safe.code}:${safe.status ?? ""}`, `TypeSafe is not authenticated (${safe.message}) Judgments will fail until the key is fixed.`);
+        }
+        throw safe;
+      }
     },
     renderCall(args) {
       return new Text(`TypeSafe · ${Object.keys(args.questions ?? {}).length} questions · external request`, 0, 0);
@@ -92,16 +120,21 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
       };
       try {
         if (action === "status") {
-          const usage = client?.getUsage();
-          const situation = keySituation();
-          const key = situation.kind === "missing" ? "missing (run /typesafe login)"
-            : situation.kind === "unusable" ? `unusable (${situation.reason})`
-            : `from ${keySourceLabel(situation)}`;
-          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}; key ${key}; ${usage?.requestsStarted ?? 0}/${DEFAULT_MAX_REQUESTS} attempts; ${usage?.requestsSucceeded ?? 0} successful; ${usage?.inputTokens ?? 0} input tokens. Model: jev-latest. Limits reset on session start/reload. ${disclosure}`);
+          const spend = client?.getSpend();
+          const auth = describeAuth(authState());
+          const session = spend
+            ? `Session ${spend.session.requestsStarted}/${DEFAULT_MAX_REQUESTS} attempts, ${spend.session.requestsSucceeded} successful, ${spend.session.requestsFailed} failed, ${spend.session.inputTokens} input tokens (~$${spend.session.estimatedUsd.toFixed(4)}).`
+            : `Session 0/${DEFAULT_MAX_REQUESTS} attempts; no client yet in this session.`;
+          const today = spend
+            ? `Today ${spend.today.requestsStarted} requests (${spend.today.requestsSucceeded} ok, ${spend.today.requestsFailed} failed), ${spend.today.inputTokens} input tokens, ~$${spend.today.estimatedUsd.toFixed(4)}.`
+            : "";
+          const blocked = spend?.blocked ? ` Cap reached: ${spend.blocked.cap} ${spend.blocked.used}/${spend.blocked.limit} on ${spend.blocked.day}; no request will be submitted until the local day rolls over.` : "";
+          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}. ${auth.text} ${session} ${today}${blocked} Model: jev-latest. Session limits reset on session start/reload; daily counters persist and caps come from client options or PI_TYPESAFE_MAX_* environment variables. ${disclosure}`, auth.level === "error" && enabled ? "warning" : "info");
           return;
         }
         if (action === "logout") {
           const removed = clearStoredApiKey();
+          clearAuthState();
           client = undefined;
           enabled = false;
           report(removed ? `Removed the stored key at ${credentialsPath()}. TypeSafe is disabled.` : "No stored key to remove." + (process.env.TYPESAFE_API_KEY?.trim() ? " TYPESAFE_API_KEY is still set in the environment." : ""));
