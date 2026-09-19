@@ -9,9 +9,24 @@ import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationReques
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
+export type TypeSafeBackend = "typesafe" | "openrouter";
+
+export interface BackendConfig {
+  host: string;
+  keyEnv?: string;
+}
+
+/** Registry of known judgment backends. Extendable by callers. */
+export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
+  typesafe: { host: "https://api.typesafe.ai", keyEnv: "TYPESAFE_API_KEY" },
+  openrouter: { host: "https://openrouter.ai", keyEnv: "OPENROUTER_API_KEY" },
+};
+
 export interface TypeSafeOptions {
   /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
   apiKey?: string;
+  /** Judgment backend. When omitted, routes to the default TypeSafe host. */
+  backend?: TypeSafeBackend;
   /** Defaults to jev-latest. No model is inferred from submitted content. */
   model?: string;
   /** Per request. Default: 15 seconds. No automatic retries. */
@@ -130,12 +145,33 @@ function capsDescription(caps: SpendCaps): string {
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   let apiKey = options.apiKey?.trim();
-  if (!apiKey) {
-    const situation = keySituation();
-    if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
-    if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
+  // Resolve backend and host.
+  const backendName = options.backend;
+  let baseURL = "https://api.typesafe.ai";
+  let keyEnv = "TYPESAFE_API_KEY";
+  if (backendName !== undefined) {
+    const backend = DECISIONS_BACKENDS[backendName];
+    if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${backendName}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
+    baseURL = backend.host;
+    keyEnv = backend.keyEnv ?? "TYPESAFE_API_KEY";
   }
-  if (!apiKey) throw new TypeSafeIntegrationError("configuration", "No TypeSafe API key. Run /typesafe login in Pi, or set TYPESAFE_API_KEY in the environment.");
+
+  if (!apiKey) {
+    // Backend-specific env var first (e.g. OPENROUTER_API_KEY), then fall back to
+    // the standard TYPESAFE_API_KEY / stored-key resolution.
+    if (backendName !== undefined && keyEnv !== "TYPESAFE_API_KEY") {
+      const fromEnv = process.env[keyEnv]?.trim();
+      if (fromEnv) apiKey = fromEnv;
+    }
+    if (!apiKey) {
+      const situation = keySituation();
+      if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
+      if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
+    }
+  }
+  if (!apiKey) {
+    throw new TypeSafeIntegrationError("configuration", `No API key. Run /typesafe login in Pi, or set ${keyEnv} in the environment.`);
+  }
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
   const maxInputBytes = positiveInteger(options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES, "maxInputBytes");
   const maxRequests = positiveInteger(options.maxRequests ?? DEFAULT_MAX_REQUESTS, "maxRequests");
@@ -146,13 +182,13 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxInputTokensPerDay === undefined ? {} : { maxInputTokensPerDay: positiveInteger(options.maxInputTokensPerDay, "maxInputTokensPerDay") }),
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
-  const model = options.model ?? "jev-latest";
+  const model = options.model ?? (backendName === "openrouter" ? "typesafe/jev-1.13" : "jev-latest");
   if (typeof model !== "string" || !model.trim() || model.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   // Do not inherit SDK debug logging or alternate destinations from the environment.
   const client = new TypeSafeClient({
     apiKey,
     defaultModel: model,
-    baseURL: "https://api.typesafe.ai",
+    baseURL,
     timeout,
     retry: { maxRetries: 0 },
     logLevel: "off",

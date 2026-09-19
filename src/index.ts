@@ -1,6 +1,7 @@
-export { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
+export { createTypeSafe, DEFAULT_MAX_REQUESTS, DECISIONS_BACKENDS } from "./client.js";
 export type {
   TypeSafe, TypeSafeOptions, EvaluationOptions, Evaluation, UsageSnapshot, SpendReport,
+  TypeSafeBackend, BackendConfig,
 } from "./client.js";
 export { ask, DEFAULT_ASK_TIMEOUT_MS } from "./ask.js";
 export type { AskAnswer, AskOptions, Judge } from "./ask.js";

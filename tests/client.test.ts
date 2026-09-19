@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
+import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, TypeSafeIntegrationError, DECISIONS_BACKENDS } from "../src/index.js";
 import type { Questions, SystemOneRequest } from "../src/index.js";
 
 export function responseFor(questions: Questions): Response {
@@ -266,4 +266,69 @@ test("evaluate admits the same near-miss aliases as the agent tool", async () =>
   const result = await client.evaluate(nearMiss as unknown as SystemOneRequest);
   assert.equal((result.answers.yes as { noul: number }).noul, 0.9);
   assert.deepEqual(sentCriteria, { true: "Is this synthetic data?" });
+});
+
+test("unknown backend throws configuration error", () => {
+  assert.throws(() => createTypeSafe({ apiKey: "test-key", backend: "bogus" as never }), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.code, "configuration");
+    assert.match(error.message, /Unknown judgment backend/);
+    assert.match(error.message, /bogus/);
+    return true;
+  });
+});
+
+test("known backend sets the right baseURL", async () => {
+  for (const backend of ["typesafe", "openrouter"] as const) {
+    let capturedUrl = "";
+    const client = createTypeSafe({
+      apiKey: "test-key",
+      backend,
+      fetch: async (url) => { capturedUrl = String(url); return responseFor(sample().questions); },
+    });
+    await client.evaluate(sample());
+    const expected = DECISIONS_BACKENDS[backend].host;
+    assert.ok(capturedUrl.startsWith(expected + "/"), `expected ${expected}, got ${capturedUrl}`);
+  }
+});
+
+test("openrouter backend uses default model typesafe/jev-1.13", async () => {
+  let sentModel: string | undefined;
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    backend: "openrouter",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { model?: string };
+      sentModel = body.model;
+      return responseFor(sample().questions);
+    },
+  });
+  await client.evaluate(sample());
+  assert.equal(sentModel, "typesafe/jev-1.13");
+});
+
+test("key resolution picks the right env var per backend", () => {
+  // With no key set, openrouter backend should complain about OPENROUTER_API_KEY.
+  const originalKey = process.env.TYPESAFE_API_KEY;
+  const originalOR = process.env.OPENROUTER_API_KEY;
+  delete process.env.TYPESAFE_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    assert.throws(() => createTypeSafe({ backend: "openrouter" }), (error: unknown) => {
+      assert.ok(error instanceof TypeSafeIntegrationError);
+      assert.match(error.message, /OPENROUTER_API_KEY/);
+      return true;
+    });
+    // Setting the env var for the right backend should get past key resolution.
+    process.env.OPENROUTER_API_KEY = "or-test-key-1234567890123456";
+    let called = false;
+    createTypeSafe({
+      backend: "openrouter",
+      fetch: async () => { called = true; return responseFor(sample().questions); },
+    });
+    assert.equal(called, false); // no evaluate yet, just construction
+  } finally {
+    if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = originalKey;
+    if (originalOR === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = originalOR;
+  }
 });
