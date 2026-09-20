@@ -292,6 +292,26 @@ test("known backend sets the right baseURL", async () => {
   }
 });
 
+// The host alone does not identify the endpoint. openrouter.ai answers the
+// SDK's own /v1/systemone with an HTML page and status 200, so a host-only
+// assertion passes while every real judgment fails response validation.
+test("each backend is called at its full request URL", async () => {
+  const expected: Record<string, string> = {
+    typesafe: "https://api.typesafe.ai/v1/systemone",
+    openrouter: "https://openrouter.ai/api/alpha/decisions",
+  };
+  for (const backend of ["typesafe", "openrouter"] as const) {
+    let capturedUrl = "";
+    const client = createTypeSafe({
+      apiKey: "test-key",
+      backend,
+      fetch: async (url) => { capturedUrl = String(url); return responseFor(sample().questions); },
+    });
+    await client.evaluate(sample());
+    assert.equal(capturedUrl, expected[backend]);
+  }
+});
+
 test("openrouter backend uses default model typesafe/jev-1.13", async () => {
   let sentModel: string | undefined;
   const client = createTypeSafe({
