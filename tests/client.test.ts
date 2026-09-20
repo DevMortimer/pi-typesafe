@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, TypeSafeIntegrationError, DECISIONS_BACKENDS } from "../src/index.js";
+import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, TypeSafeIntegrationError } from "../src/index.js";
 import type { Questions, SystemOneRequest } from "../src/index.js";
 
 export function responseFor(questions: Questions): Response {
@@ -278,8 +278,13 @@ test("unknown backend throws configuration error", () => {
   });
 });
 
-test("known backend sets the right baseURL", async () => {
-  for (const backend of ["typesafe", "openrouter"] as const) {
+test("known backend is called at its full request URL", async () => {
+  // A host does not identify the endpoint: openrouter.ai answers the SDK's own /v1/systemone with an HTML page and status 200.
+  const backends = [
+    ["typesafe", "https://api.typesafe.ai/v1/systemone"],
+    ["openrouter", "https://openrouter.ai/api/alpha/decisions"],
+  ] as const;
+  for (const [backend, expected] of backends) {
     let capturedUrl = "";
     const client = createTypeSafe({
       apiKey: "test-key",
@@ -287,28 +292,7 @@ test("known backend sets the right baseURL", async () => {
       fetch: async (url) => { capturedUrl = String(url); return responseFor(sample().questions); },
     });
     await client.evaluate(sample());
-    const expected = DECISIONS_BACKENDS[backend].host;
-    assert.ok(capturedUrl.startsWith(expected + "/"), `expected ${expected}, got ${capturedUrl}`);
-  }
-});
-
-// The host alone does not identify the endpoint. openrouter.ai answers the
-// SDK's own /v1/systemone with an HTML page and status 200, so a host-only
-// assertion passes while every real judgment fails response validation.
-test("each backend is called at its full request URL", async () => {
-  const expected: Record<string, string> = {
-    typesafe: "https://api.typesafe.ai/v1/systemone",
-    openrouter: "https://openrouter.ai/api/alpha/decisions",
-  };
-  for (const backend of ["typesafe", "openrouter"] as const) {
-    let capturedUrl = "";
-    const client = createTypeSafe({
-      apiKey: "test-key",
-      backend,
-      fetch: async (url) => { capturedUrl = String(url); return responseFor(sample().questions); },
-    });
-    await client.evaluate(sample());
-    assert.equal(capturedUrl, expected[backend]);
+    assert.equal(capturedUrl, expected);
   }
 });
 
