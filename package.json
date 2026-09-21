@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "TypeSafe AI (Jev) decisions for Pi: batched Choice/Score/Noul evaluation tool, terminal playground, and a typed API other extensions build on.",
   "type": "module",
   "license": "MIT",

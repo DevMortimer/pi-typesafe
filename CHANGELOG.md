@@ -4,6 +4,18 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.6.1
+
+### Fixed
+
+- Send OpenRouter judgments to `/api/alpha/decisions` instead of the TypeSafe SDK's default `/v1/systemone` path, while preserving caller-supplied transports (#2).
+- Keep the lockfile's root package version aligned with the published package.
+
+### Added
+
+- Contributor CI for supported Node versions on Linux and macOS, workflow lint, installed-package smoke tests, and a combined `CI passed` check.
+- Verified package artifacts, tag-triggered draft GitHub releases, weekly dependency updates, and contributor/release guidance; npm publication remains manual.
+
 ## 0.6.0
 
 ### Added
