@@ -1,5 +1,7 @@
 # pi-typesafe
 
+[![CI](https://github.com/DevMortimer/pi-typesafe/actions/workflows/ci.yml/badge.svg)](https://github.com/DevMortimer/pi-typesafe/actions/workflows/ci.yml)
+
 [Jev](https://typesafe.ai) inside [Pi](https://pi.dev). Jev is TypeSafe's judgment model: send it some state and typed questions and it returns probabilities instead of prose, in well under a second, for a fraction of a cent. This package gives Pi three things built on it:
 
 - **A tool for the agent.** `typesafe_evaluate` hands small structured judgments (classify, triage, compare, score) to Jev and returns calibrated numbers in one batched call.
@@ -141,12 +143,14 @@ Your extension owns its own user consent and budget; `/typesafe enable` applies 
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run check        # typecheck, offline tests, build
 cp .env.example .env # add your key locally; .env is git-ignored
 npm run test:live    # one billable sample request
 npm run dev:pi       # start Pi with only this working tree as extension (.env optional)
 ```
+
+Pull requests run key-free checks on Linux and macOS, supported Node versions, and the installed npm package. Version tags prepare a draft release; npm publishing stays manual. See [Contributing](CONTRIBUTING.md) and [CI and continuous delivery](docs/ci-cd.md).
 
 ## License
 
