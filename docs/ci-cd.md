@@ -10,8 +10,10 @@ this project prepares draft releases but does not automatically publish to npm.
 - **Workflow lint** runs actionlint 1.7.12 and ShellCheck on the workflow commands.
 - **Check (ubuntu-latest, Node 22.19.0)** tests the minimum supported Node version.
 - Linux also runs Node **24** and **26**; macOS runs Node **24**. Each job installs
-  the lockfile with `npm ci`, then runs `npm run check`: typecheck, offline tests,
-  and build. Native Windows is not in this matrix; the existing credential and
+  the lockfile with `npm ci`, then runs `npm run check`: build, typecheck, and
+  offline tests. Build runs first because the public-API example resolves this
+  package's exports through `dist/`; this also checks the generated declarations
+  from a clean checkout. Native Windows is not in this matrix; the existing credential and
   usage tests assert POSIX file permissions.
 - **Package** builds an actual npm tarball and installs it outside the checkout
   with install scripts disabled. It checks root and calibration imports without

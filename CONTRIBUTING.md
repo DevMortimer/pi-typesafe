@@ -10,7 +10,7 @@ pi-typesafe is the TypeSafe client other Pi extensions build on: key storage, co
 
 ## Change
 
-1. `npm ci`, then `npm run check` (typecheck, offline tests with an injected `fetch`, build). It must pass before and after your change.
+1. `npm ci`, then `npm run check` (build, typecheck, offline tests with an injected `fetch`). It must pass before and after your change.
 2. Behaviour changes come with tests in `tests/`. Everything is testable offline through the `fetch` option; no test may need a key or the network.
 3. `npm run test:live` sends one billable request with your own key. Run it when you touch the transport or the response validation and say so in the PR.
 

@@ -10,6 +10,7 @@
 
 - Send OpenRouter judgments to `/api/alpha/decisions` instead of the TypeSafe SDK's default `/v1/systemone` path, while preserving caller-supplied transports (#2).
 - Keep the lockfile's root package version aligned with the published package.
+- Build declarations before checking public-API examples so `npm run check` works from a clean checkout.
 
 ### Added
 

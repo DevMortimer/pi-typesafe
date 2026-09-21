@@ -144,7 +144,7 @@ Your extension owns its own user consent and budget; `/typesafe enable` applies 
 
 ```bash
 npm ci
-npm run check        # typecheck, offline tests, build
+npm run check        # build, typecheck, offline tests
 cp .env.example .env # add your key locally; .env is git-ignored
 npm run test:live    # one billable sample request
 npm run dev:pi       # start Pi with only this working tree as extension (.env optional)
