@@ -14,13 +14,23 @@ export type TypeSafeBackend = "typesafe" | "openrouter";
 export interface BackendConfig {
   host: string;
   keyEnv?: string;
+  /** Request path, when the backend does not serve the SDK's own `/v1/systemone`. */
+  path?: string;
 }
+
+/** The path the SDK appends to whatever base URL it is given. */
+const SDK_PATH = "/v1/systemone";
 
 /** Registry of known judgment backends. Extendable by callers. */
 export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
   typesafe: { host: "https://api.typesafe.ai", keyEnv: "TYPESAFE_API_KEY" },
-  openrouter: { host: "https://openrouter.ai", keyEnv: "OPENROUTER_API_KEY" },
+  openrouter: { host: "https://openrouter.ai", keyEnv: "OPENROUTER_API_KEY", path: "/api/alpha/decisions" },
 };
+
+/** Send the SDK's fixed path to the backend's own, preserving any caller-supplied transport. */
+function backendFetch(path: string, inner: Fetch = fetch): Fetch {
+  return (input, init) => inner(String(input).replace(SDK_PATH, path), init);
+}
 
 export interface TypeSafeOptions {
   /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
@@ -149,11 +159,13 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const backendName = options.backend;
   let baseURL = "https://api.typesafe.ai";
   let keyEnv = "TYPESAFE_API_KEY";
+  let backendPath: string | undefined;
   if (backendName !== undefined) {
     const backend = DECISIONS_BACKENDS[backendName];
     if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${backendName}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
     baseURL = backend.host;
     keyEnv = backend.keyEnv ?? "TYPESAFE_API_KEY";
+    backendPath = backend.path;
   }
 
   if (!apiKey) {
@@ -182,6 +194,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxInputTokensPerDay === undefined ? {} : { maxInputTokensPerDay: positiveInteger(options.maxInputTokensPerDay, "maxInputTokensPerDay") }),
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
+  const transport = backendPath ? backendFetch(backendPath, options.fetch) : options.fetch;
   const model = options.model ?? (backendName === "openrouter" ? "typesafe/jev-1.13" : "jev-latest");
   if (typeof model !== "string" || !model.trim() || model.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   // Do not inherit SDK debug logging or alternate destinations from the environment.
@@ -192,7 +205,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     timeout,
     retry: { maxRetries: 0 },
     logLevel: "off",
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    ...(transport ? { fetch: transport } : {}),
   });
   const ledger = options.ledger ?? openUsageLedger({ usdPerMTok });
   const usage = { requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0 };
