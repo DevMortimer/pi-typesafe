@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_MAX_INPUT_BYTES, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
+  DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
 } from "../src/index.js";
 
 const hasCode = (code: string) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === code;
@@ -59,4 +59,27 @@ test("admission still rejects non-JSON state", () => {
   cycle.self = cycle;
   assert.throws(() => prepareEvaluationRequest({ state: cycle, questions: { yes: { type: "noul", instructions: "?" } } }), hasCode("validation"));
   assert.throws(() => prepareEvaluationRequest({ state: { n: NaN }, questions: { yes: { type: "noul", instructions: "?" } } }), hasCode("validation"));
+});
+
+test("every field the agent authors carries a description, so a bare union is not its only guidance", () => {
+  // Walk the serialized schema rather than pin TypeBox's layout: collect every `properties` entry by name.
+  const authored = new Map<string, number>();
+  const undescribed: string[] = [];
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const record = node as Record<string, unknown>;
+    if (record.properties && typeof record.properties === "object") {
+      for (const [name, field] of Object.entries(record.properties as Record<string, Record<string, unknown>>)) {
+        authored.set(name, (authored.get(name) ?? 0) + 1);
+        if (typeof field.description !== "string" || field.description.length === 0) undescribed.push(name);
+      }
+    }
+    Object.values(record).forEach(walk);
+  };
+  walk(JSON.parse(JSON.stringify(evaluationSchema)));
+  assert.equal(authored.get("type"), 3, "the schema must still offer noul, choice, and score");
+  for (const name of ["state", "questions", "model", "instructions", "criteria"]) assert.ok(authored.has(name), `${name} is still authored`);
+  // `true` and `false` inside noul criteria are the only fields whose parent already explains them.
+  assert.deepEqual(undescribed.filter(name => name !== "true" && name !== "false"), [], "every authored field must say what it means");
 });
