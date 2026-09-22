@@ -104,15 +104,40 @@ test("keySituation is total and names every kind", { skip: process.platform === 
   assert.throws(() => resolveApiKey(), (error: unknown) => error instanceof TypeSafeIntegrationError && error.message === situation.reason);
 
   process.env.TYPESAFE_API_KEY = `  ${validKey}  `;
-  assert.deepEqual(keySituation(), { kind: "environment", key: validKey });
+  assert.deepEqual(keySituation(), { kind: "environment", key: validKey, keyEnv: "TYPESAFE_API_KEY" });
 
   // Environment values are trusted as-is; a wrong key fails at the API with its own advice.
   process.env.TYPESAFE_API_KEY = "short";
-  assert.deepEqual(keySituation(), { kind: "environment", key: "short" });
+  assert.deepEqual(keySituation(), { kind: "environment", key: "short", keyEnv: "TYPESAFE_API_KEY" });
+});
+
+test("keySituation for another backend reads only that backend's variable, never the TypeSafe store", () => {
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  try {
+    delete process.env.OPENROUTER_API_KEY;
+    storeApiKey(validKey);
+    process.env.TYPESAFE_API_KEY = validKey;
+    // A stored or TypeSafe-environment key is not an OpenRouter key.
+    assert.deepEqual(keySituation("openrouter"), { kind: "missing" });
+    assert.equal(resolveApiKey("openrouter"), undefined);
+
+    process.env.OPENROUTER_API_KEY = "  sk-or-test-0123456789abcdef  ";
+    const situation = keySituation("openrouter");
+    assert.deepEqual(situation, { kind: "environment", key: "sk-or-test-0123456789abcdef", keyEnv: "OPENROUTER_API_KEY" });
+    assert.equal(keySourceLabel(situation), "OPENROUTER_API_KEY");
+    assert.deepEqual(resolveApiKey("openrouter"), { key: "sk-or-test-0123456789abcdef", source: "environment" });
+    // The OpenRouter variable does not leak into the TypeSafe resolution either.
+    delete process.env.TYPESAFE_API_KEY;
+    assert.equal(keySituation().kind, "stored");
+    assert.throws(() => keySituation("bogus" as never), (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "configuration" && /Unknown judgment backend/.test(error.message));
+  } finally {
+    if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+  }
 });
 
 test("keySourceLabel names each source", () => {
   assert.equal(keySourceLabel({ kind: "environment", key: "k" }), "TYPESAFE_API_KEY");
+  assert.equal(keySourceLabel({ kind: "environment", key: "k", keyEnv: "OPENROUTER_API_KEY" }), "OPENROUTER_API_KEY");
   assert.equal(keySourceLabel({ kind: "stored", key: "k", path: "/tmp/auth.json" }), "/typesafe login");
   assert.equal(keySourceLabel({ kind: "missing" }), "no key");
   assert.equal(keySourceLabel({ kind: "unusable", path: "/tmp/auth.json", reason: "r" }), "unusable key");

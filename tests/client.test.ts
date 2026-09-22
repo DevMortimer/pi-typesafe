@@ -311,6 +311,25 @@ test("openrouter backend uses default model typesafe/jev-1.13", async () => {
   assert.equal(sentModel, "typesafe/jev-1.13");
 });
 
+test("a TypeSafe key is never sent to another backend", () => {
+  const originalKey = process.env.TYPESAFE_API_KEY;
+  const originalOR = process.env.OPENROUTER_API_KEY;
+  process.env.TYPESAFE_API_KEY = "ts-test-key-1234567890123456";
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    assert.throws(() => createTypeSafe({ backend: "openrouter" }), (error: unknown) => {
+      assert.ok(error instanceof TypeSafeIntegrationError);
+      assert.equal(error.code, "configuration");
+      assert.match(error.message, /OPENROUTER_API_KEY/);
+      assert.doesNotMatch(error.message, /typesafe login/);
+      return true;
+    });
+  } finally {
+    if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = originalKey;
+    if (originalOR === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = originalOR;
+  }
+});
+
 test("key resolution picks the right env var per backend", () => {
   // With no key set, openrouter backend should complain about OPENROUTER_API_KEY.
   const originalKey = process.env.TYPESAFE_API_KEY;

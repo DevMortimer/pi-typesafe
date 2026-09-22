@@ -138,7 +138,9 @@ const answer = await ask(typesafe, {
 if (!answer.ok) return { skipped: answer.errorCode === "budget" };  // never throws
 ```
 
-Your extension owns its own user consent and budget; `/typesafe enable` applies only to this package's tool. Check `authState()` rather than your own consent flag before you report that judgments are on. Every export — the client, `ask`, batching, the usage ledger, auth state, and the `pi-typesafe/calibrate` and `pi-typesafe/ui` entry points — is in [docs/api.md](docs/api.md).
+Your extension owns its own user consent and budget; `/typesafe enable` applies only to this package's tool. Check `authState()` rather than your own consent flag before you report that judgments are on.
+
+Judgments can also go through OpenRouter: `createTypeSafe({ backend: "openrouter" })` sends them to `openrouter.ai` with the key from `OPENROUTER_API_KEY`. That backend has no login store, so `/typesafe login` does not apply to it. Pass the same `backend` to `authState`, `keySituation`, and `ensureApiKey`, or the status you report describes the TypeSafe key while the requests use another one. The `/typesafe` commands and the `typesafe_evaluate` tool always use the TypeSafe backend. Every export — the client, `ask`, batching, the usage ledger, auth state, and the `pi-typesafe/calibrate` and `pi-typesafe/ui` entry points — is in [docs/api.md](docs/api.md).
 
 ## Development
 

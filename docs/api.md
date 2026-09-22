@@ -23,8 +23,9 @@ result.answers.severity.score;   // 0..2, may be fractional
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `apiKey` | `TYPESAFE_API_KEY`, else the `/typesafe login` store | Never returned |
-| `model` | `jev-latest` | No model is inferred from submitted content |
+| `apiKey` | the backend's key (below) | Never returned |
+| `backend` | `typesafe` | `typesafe` or `openrouter`; picks the host, the request path, the default model, and the key |
+| `model` | `jev-latest` (`typesafe/jev-1.13` on OpenRouter) | No model is inferred from submitted content |
 | `timeoutMs` | `15000` | Per request; no automatic retries |
 | `maxInputBytes` | `65536` | UTF-8 JSON bytes, not tokens |
 | `maxRequests` | `20` | Attempts per client instance, failures included |
@@ -32,6 +33,8 @@ result.answers.severity.score;   // 0..2, may be fractional
 | `usdPerMTok` | `0.042` | Price used for the estimate and the USD cap |
 | `ledger` | the store next to the key | Inject a ledger in tests |
 | `fetch` | global fetch | Inject a transport for offline tests |
+
+`DECISIONS_BACKENDS` is the registry behind `backend`: each entry carries `label`, `host`, `keyEnv`, and, when the service does not serve the SDK's own path, `path`. `DEFAULT_BACKEND` is `"typesafe"`. The TypeSafe backend takes its key from `TYPESAFE_API_KEY`, then the `/typesafe login` store. Every other backend reads only its own environment variable (`OPENROUTER_API_KEY` for OpenRouter): the store holds a TypeSafe key, and a login verifies against api.typesafe.ai, so neither applies elsewhere. Pass the same `backend` to `authState`, `keySituation`, and `ensureApiKey` so what you report matches what you send.
 
 `evaluate(request, { signal })` validates before sending and rejects with `TypeSafeIntegrationError`. `code` is one of `configuration`, `validation`, `budget`, `aborted`, `timeout`, `http`, `connection`, `response`; messages never contain upstream bodies, headers, keys, or your submitted state. `listModels()` verifies the key without counting toward `maxRequests`.
 
@@ -70,11 +73,11 @@ The environment may lower an explicit cap, never raise it. A reached cap raises 
 
 ## Auth state
 
-`authState()` never throws. It reports `kind` (`environment`, `stored`, `missing`, `unusable`), `keyName`, `path`, `reason`, `verified`, `verifiedAt`, `lastFailure`, and `usable` — `usable` is false when no key is present or the last authentication outcome was an HTTP 401/403 rejection.
+`authState({ backend })` never throws. It reports `backend`, `kind` (`environment`, `stored`, `missing`, `unusable`), `keyName`, `path`, `reason`, `verified`, `verifiedAt`, `lastFailure`, and `usable` — `usable` is false when no key is present or the last authentication outcome was an HTTP 401/403 rejection. `backend` defaults to `typesafe`; name the backend you pass to `createTypeSafe`, or the report describes a key you do not send. The verification and failure record is one file shared by every backend, so after switching backends the last outcome stands until the next request.
 
 `describeAuth(state)` turns that into `{ level: "ok" | "warning" | "error", text }` for a status line or a log. The extension calls both at session start and after a rejection, so an enabled-but-unusable setup is never reported as working.
 
-`recordAuthVerified()` is called by `listModels()` and by the first successful request; `recordAuthFailure(error)` records what degraded TypeSafe; `clearAuthState()` forgets both, and `/typesafe logout` calls it. `keySituation()` and `keySourceLabel(situation)` remain the lower-level, frozen-for-existing-callers pair, and `resolveApiKey()` the pre-0.4.0 one.
+`recordAuthVerified()` is called by `listModels()` and by the first successful request; `recordAuthFailure(error)` records what degraded TypeSafe; `clearAuthState()` forgets both, and `/typesafe logout` calls it. `keySituation(backend)` and `keySourceLabel(situation)` remain the lower-level, frozen-for-existing-callers pair, and `resolveApiKey(backend)` the pre-0.4.0 one; the `backend` argument is optional and defaults to `typesafe`. An environment situation names the variable it read in `keyEnv`.
 
 ## Asking without throwing
 
@@ -111,7 +114,7 @@ console.log(formatCalibration(calibrate("action guard", samplesOf(results).sampl
 
 ## Login helpers: `pi-typesafe/ui`
 
-`ensureApiKey(ctx)`, `loginWithPrompt(ctx)`, and `promptForApiKey(ctx)` use the same hidden input as `/typesafe login`. `ensureApiKey(ctx)` returns the existing key source, or prompts, verifies, and stores a new key (`undefined` when the user cancels). These need Pi's TUI, so call them only from extension command handlers.
+`ensureApiKey(ctx, { backend })`, `loginWithPrompt(ctx)`, and `promptForApiKey(ctx)` use the same hidden input as `/typesafe login`. `ensureApiKey(ctx)` returns the existing key source, or prompts, verifies, and stores a new TypeSafe key (`undefined` when the user cancels). For any other backend it returns the environment source or throws `configuration` naming the variable to set; it never opens the prompt, because the prompt verifies against api.typesafe.ai and writes the TypeSafe store. These need Pi's TUI, so call them only from extension command handlers.
 
 ## One agent tool
 

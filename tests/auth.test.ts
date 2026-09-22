@@ -30,6 +30,34 @@ test("no key at all is an error the consumer cannot mistake for a working setup"
   assert.ok(report.text.includes("every Jev judgment is skipped"));
 });
 
+test("another backend reports its own key and never the TypeSafe login hint", () => {
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  try {
+    delete process.env.OPENROUTER_API_KEY;
+    process.env.TYPESAFE_API_KEY = "env-key-0123456789abcdef";
+    assert.equal(authState().backend, "typesafe");
+    const missing = authState({ backend: "openrouter" });
+    assert.equal(missing.backend, "openrouter");
+    assert.equal(missing.kind, "missing");
+    assert.equal(missing.usable, false);
+    const report = describeAuth(missing);
+    assert.equal(report.level, "error");
+    assert.ok(report.text.startsWith("OpenRouter key: missing"));
+    assert.ok(report.text.includes("OPENROUTER_API_KEY is set"));
+    assert.ok(!report.text.includes("/typesafe login"));
+
+    process.env.OPENROUTER_API_KEY = "sk-or-0123456789abcdef";
+    const present = authState({ backend: "openrouter" });
+    assert.equal(present.kind, "environment");
+    assert.equal(present.keyName, "OPENROUTER_API_KEY");
+    assert.equal(present.usable, true);
+    assert.ok(describeAuth(present).text.startsWith("OpenRouter key: OPENROUTER_API_KEY"));
+  } finally {
+    delete process.env.TYPESAFE_API_KEY;
+    if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+  }
+});
+
 test("an environment key is usable but unverified until something proves it", () => {
   process.env.TYPESAFE_API_KEY = "env-key-0123456789abcdef";
   try {

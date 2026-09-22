@@ -1,5 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
+import type { TypeSafeBackend } from "./backends.js";
 import { credentialsPath, keySituation, keySourceLabel, piTypesafeDir } from "./credentials.js";
 import type { KeySource } from "./credentials.js";
 import { TypeSafeIntegrationError } from "./errors.js";
@@ -26,6 +28,8 @@ export interface AuthFailure {
  * that judgments will happen — an enabled extension with no key used to look identical to a working one.
  */
 export interface AuthState {
+  /** The judgment backend this state describes; each backend has its own key. */
+  readonly backend: TypeSafeBackend;
   /** Same kinds as KeySituation: where the key in effect comes from. */
   readonly kind: "environment" | "stored" | "missing" | "unusable";
   readonly source?: KeySource;
@@ -33,9 +37,12 @@ export interface AuthState {
   readonly path: string;
   /** Why a stored key cannot be used, when that is the case. */
   readonly reason?: string;
-  /** Short human label for the key source: `TYPESAFE_API_KEY`, `/typesafe login`, `no key`, `unusable key`. */
+  /** Short human label for the key source: `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `/typesafe login`, `no key`, `unusable key`. */
   readonly keyName: string;
-  /** True when the key in effect was accepted by api.typesafe.ai (login verifies it; a successful request proves it). */
+  /**
+   * True when the key in effect was accepted by the backend (login verifies a TypeSafe key; a successful request proves
+   * any key). The record is shared across backends: switching backends keeps the last outcome until the next request.
+   */
   readonly verified: boolean;
   readonly verifiedAt?: string;
   /** The last failure, cleared by the next successful request. */
@@ -82,15 +89,17 @@ function writeState(path: string, state: { verifiedAt?: string; lastFailure?: Au
   }
 }
 
-/** What the key situation, the last outcome, and the clock add up to. Never throws. */
-export function authState(options: { path?: string } = {}): AuthState {
+/** What the key situation, the last outcome, and the clock add up to for one backend. Never throws. */
+export function authState(options: { path?: string; backend?: TypeSafeBackend } = {}): AuthState {
   const path = options.path ?? authStatePath();
-  const situation = keySituation();
+  const backend = options.backend ?? DEFAULT_BACKEND;
+  const situation = keySituation(backend);
   const stored = readState(path);
   const source: KeySource | undefined = situation.kind === "environment" ? "environment" : situation.kind === "stored" ? "stored" : undefined;
   const rejected = stored.lastFailure?.code === "http" && stored.lastFailure.status !== undefined && REJECTED_STATUSES.has(stored.lastFailure.status);
   const usable = source !== undefined && !rejected;
   return {
+    backend,
     kind: situation.kind,
     ...(source === undefined ? {} : { source }),
     path: situation.kind === "unusable" ? situation.path : credentialsPath(),
@@ -137,19 +146,22 @@ export interface AuthReport {
  * state instead of reporting "enabled".
  */
 export function describeAuth(state: AuthState = authState()): AuthReport {
+  const config = backendConfig(state.backend ?? DEFAULT_BACKEND);
+  const label = `${config.label} key`;
   const since = state.lastFailure ? ` Last failure: ${state.lastFailure.message}${state.lastFailure.at ? ` (${state.lastFailure.at})` : ""}` : "";
   if (state.kind === "missing") {
-    return { level: "error", text: `TypeSafe key: missing — every Jev judgment is skipped until a key is configured (/typesafe login or TYPESAFE_API_KEY).${since}` };
+    const how = usesTypesafeKey(config) ? `a key is configured (/typesafe login or ${TYPESAFE_KEY_ENV})` : `${config.keyEnv} is set in the environment`;
+    return { level: "error", text: `${label}: missing — every Jev judgment is skipped until ${how}.${since}` };
   }
   if (state.kind === "unusable") {
-    return { level: "error", text: `TypeSafe key: unusable (${state.reason ?? "unknown reason"}) — judgments are skipped until the key is fixed.${since}` };
+    return { level: "error", text: `${label}: unusable (${state.reason ?? "unknown reason"}) — judgments are skipped until the key is fixed.${since}` };
   }
   const rejected = state.lastFailure?.code === "http" && state.lastFailure.status !== undefined && REJECTED_STATUSES.has(state.lastFailure.status);
   if (rejected) {
-    return { level: "error", text: `TypeSafe key: ${state.keyName} was rejected.${since}` };
+    return { level: "error", text: `${label}: ${state.keyName} was rejected.${since}` };
   }
   if (!state.verified) {
-    return { level: "warning", text: `TypeSafe key: ${state.keyName} (not verified yet — the first request proves it).${since}` };
+    return { level: "warning", text: `${label}: ${state.keyName} (not verified yet — the first request proves it).${since}` };
   }
-  return { level: "ok", text: `TypeSafe key: ${state.keyName} (verified${state.verifiedAt ? ` ${state.verifiedAt}` : ""}).${since}` };
+  return { level: "ok", text: `${label}: ${state.keyName} (verified${state.verifiedAt ? ` ${state.verifiedAt}` : ""}).${since}` };
 }

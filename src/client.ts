@@ -1,6 +1,8 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
+import type { TypeSafeBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
@@ -9,23 +11,11 @@ import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationReques
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
-export type TypeSafeBackend = "typesafe" | "openrouter";
-
-export interface BackendConfig {
-  host: string;
-  keyEnv?: string;
-  /** Request path, when the backend does not serve the SDK's own `/v1/systemone`. */
-  path?: string;
-}
+export { DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
+export type { BackendConfig, TypeSafeBackend } from "./backends.js";
 
 /** The path the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
-
-/** Registry of known judgment backends. Extendable by callers. */
-export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
-  typesafe: { host: "https://api.typesafe.ai", keyEnv: "TYPESAFE_API_KEY" },
-  openrouter: { host: "https://openrouter.ai", keyEnv: "OPENROUTER_API_KEY", path: "/api/alpha/decisions" },
-};
 
 /** Send the SDK's fixed path to the backend's own, preserving any caller-supplied transport. */
 function backendFetch(path: string, inner: Fetch = fetch): Fetch {
@@ -155,34 +145,20 @@ function capsDescription(caps: SpendCaps): string {
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   let apiKey = options.apiKey?.trim();
-  // Resolve backend and host.
-  const backendName = options.backend;
-  let baseURL = "https://api.typesafe.ai";
-  let keyEnv = "TYPESAFE_API_KEY";
-  let backendPath: string | undefined;
-  if (backendName !== undefined) {
-    const backend = DECISIONS_BACKENDS[backendName];
-    if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${backendName}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
-    baseURL = backend.host;
-    keyEnv = backend.keyEnv ?? "TYPESAFE_API_KEY";
-    backendPath = backend.path;
-  }
+  const backendName: TypeSafeBackend = options.backend ?? DEFAULT_BACKEND;
+  const backend = backendConfig(backendName);
+  const baseURL = backend.host;
+  const backendPath = backend.path;
 
   if (!apiKey) {
-    // Backend-specific env var first (e.g. OPENROUTER_API_KEY), then fall back to
-    // the standard TYPESAFE_API_KEY / stored-key resolution.
-    if (backendName !== undefined && keyEnv !== "TYPESAFE_API_KEY") {
-      const fromEnv = process.env[keyEnv]?.trim();
-      if (fromEnv) apiKey = fromEnv;
-    }
-    if (!apiKey) {
-      const situation = keySituation();
-      if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
-      if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
-    }
+    // The same resolution that authState() and ensureApiKey() report, so the status line and the request agree.
+    const situation = keySituation(backendName);
+    if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
+    if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
   }
   if (!apiKey) {
-    throw new TypeSafeIntegrationError("configuration", `No API key. Run /typesafe login in Pi, or set ${keyEnv} in the environment.`);
+    const how = usesTypesafeKey(backend) ? `Run /typesafe login in Pi, or set ${TYPESAFE_KEY_ENV}` : `Set ${backend.keyEnv}`;
+    throw new TypeSafeIntegrationError("configuration", `No API key. ${how} in the environment.`);
   }
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
   const maxInputBytes = positiveInteger(options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES, "maxInputBytes");

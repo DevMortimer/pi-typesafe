@@ -81,3 +81,21 @@ test("ensureApiKey reports an existing key without prompting, otherwise logs in"
   assert.deepEqual(await ensureApiKey(ctx()), { source: "stored" }, "second call reuses the stored key");
   assert.equal(modelListCalls, 1);
 });
+
+test("ensureApiKey for another backend uses its environment variable and never opens the TypeSafe login", async () => {
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  try {
+    delete process.env.OPENROUTER_API_KEY;
+    // A stored TypeSafe key does not satisfy OpenRouter, and the prompt must not run: it would verify against api.typesafe.ai.
+    customResult = "ts_live_key_0123456789abcdef";
+    assert.deepEqual(await ensureApiKey(ctx()), { source: "stored", login: { path: storedPath(), models: 2 } });
+    await assert.rejects(ensureApiKey(ctx(), { backend: "openrouter" }), (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "configuration" && /OPENROUTER_API_KEY/.test(error.message));
+    assert.equal(modelListCalls, 1, "no second verification");
+
+    process.env.OPENROUTER_API_KEY = "sk-or-0123456789abcdef";
+    assert.deepEqual(await ensureApiKey(ctx(), { backend: "openrouter" }), { source: "environment" });
+    assert.equal(modelListCalls, 1);
+  } finally {
+    if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+  }
+});
