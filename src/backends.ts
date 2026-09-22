@@ -14,6 +14,10 @@ export interface BackendConfig {
   modelsPath?: string;
   /** Field the model list arrives in, when the backend does not use the SDK's own `models`. */
   modelsField?: string;
+  /** Entry field carrying the id callers pass as `model:`, when the SDK's own `name` is only a label. */
+  modelsIdField?: string;
+  /** Whether the model list checks the key. A public list accepts any key, so it proves nothing. Absent means it does. */
+  modelsVerifyKey?: boolean;
 }
 
 /** The backend every key and auth function assumes when none is named. */
@@ -32,6 +36,8 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
     path: "/api/alpha/decisions",
     modelsPath: "/api/v1/models",
     modelsField: "data",
+    modelsIdField: "id",
+    modelsVerifyKey: false,
   },
 };
 

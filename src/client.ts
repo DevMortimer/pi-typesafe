@@ -29,24 +29,33 @@ function backendFetch(backend: BackendConfig, inner: Fetch = fetch): Fetch {
     const models = modelsPath !== undefined && url.includes(SDK_MODELS_PATH);
     const rewrite = models ? modelsPath : path;
     const response = await inner(rewrite === undefined ? url : url.replace(models ? SDK_MODELS_PATH : SDK_PATH, rewrite), init);
-    return models && modelsField !== undefined ? renameModelsField(response, modelsField) : response;
+    return models && modelsField !== undefined ? translateModels(response, backend) : response;
   };
 }
 
 /**
- * Hand the SDK the field it reads when a backend names the model list differently. Status and headers survive; a body
- * without the declared field is passed through unchanged, so the SDK still reports its own shape error.
+ * Hand the SDK the list it expects: the field it reads, and the entry value callers pass as `model:` when the backend
+ * labels models differently. Status and headers survive; a body without the declared field is passed through
+ * unchanged, so the SDK still reports its own shape error.
  */
-async function renameModelsField(response: Response, field: string): Promise<Response> {
+async function translateModels(response: Response, backend: BackendConfig): Promise<Response> {
+  const { modelsField, modelsIdField } = backend;
   const text = await response.text();
   let wire: unknown;
   try { wire = JSON.parse(text); } catch { wire = undefined; }
-  const list = wire !== null && typeof wire === "object" ? (wire as Record<string, unknown>)[field] : undefined;
+  const list = modelsField !== undefined && wire !== null && typeof wire === "object" ? (wire as Record<string, unknown>)[modelsField] : undefined;
   const headers = new Headers(response.headers);
   // The body is replaced, so a copied length would describe the old one.
   headers.delete("content-length");
   headers.delete("content-encoding");
-  return new Response(Array.isArray(list) ? JSON.stringify({ models: list }) : text, { status: response.status, statusText: response.statusText, headers });
+  const send = (body: string) => new Response(body, { status: response.status, statusText: response.statusText, headers });
+  if (!Array.isArray(list)) return send(text);
+  const models = list.map(entry => {
+    if (modelsIdField === undefined || entry === null || typeof entry !== "object") return entry;
+    const id = (entry as Record<string, unknown>)[modelsIdField];
+    return typeof id === "string" && id.length > 0 ? { ...entry, name: id } : entry;
+  });
+  return send(JSON.stringify({ models }));
 }
 
 export interface TypeSafeOptions {
@@ -235,7 +244,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       try {
         const models = await client.models.list(callOptions);
         if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected model list.");
-        if (!verificationRecorded) {
+        // A backend that serves its list publicly accepts any key, so a success there proves nothing about one.
+        if (backend.modelsVerifyKey !== false && !verificationRecorded) {
           verificationRecorded = true;
           recordAuthVerified();
         }
