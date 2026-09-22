@@ -7,6 +7,7 @@ import { after, before, test } from "node:test";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Extension, RegisteredCommand, RegisteredTool } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { parseEvaluationRequest } from "../src/index.js";
 
 let temporary: string;
 let extension: Extension;
@@ -84,8 +85,13 @@ test("Pi loads a tool, a slash command, and a result renderer without network ca
   const completions = await command.getArgumentCompletions?.("pla");
   assert.ok(completions?.some(item => item.value === "playground"));
   assert.ok(tool.definition.promptGuidelines?.some(text => /one question per item per dimension/.test(text)));
-  // Models that never saw a payload author questions as an array; the guidelines must show one.
-  assert.ok(tool.definition.promptGuidelines?.some(text => /"state":/.test(text) && !/\n/.test(text)));
+  // Models that never saw a payload author questions as an array; the guidelines must show one that actually validates.
+  const example = tool.definition.promptGuidelines?.find(text => /"state":/.test(text));
+  assert.ok(example, "one guideline shows a request payload");
+  assert.doesNotMatch(example, /\n/, "the example stays on one line");
+  assert.ok(example.length < 1024, "the example is paid for on every tool listing, so it stays short");
+  const payload = parseEvaluationRequest(JSON.parse(example.slice(example.indexOf("{"))));
+  assert.deepEqual(Object.values(payload.questions).map(question => question.type).sort(), ["choice", "noul", "score"]);
   assert.ok(/named state field/.test(tool.definition.description));
 });
 

@@ -16,7 +16,7 @@ const sample = {
   questions: {
     category: { type: "choice", instructions: "Which team should handle this message?", criteria: { billing: "Charges and payments", technical: "Software failures", other: "None of these" } },
     urgent: { type: "noul", instructions: "Does the sender request help today?" },
-    frustration: { type: "score", instructions: "How frustrated does the sender sound?", criteria: ["A neutral request without expressed frustration", "Expressed frustration while remaining civil", "Explicit anger or threats"] },
+    frustration: { type: "score", instructions: "How frustrated does the sender sound?", criteria: ["Neutral request", "Frustrated but civil", "Angry or threatening"] },
   },
 };
 
@@ -71,6 +71,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     promptSnippet: "Ask batched structured questions with TypeSafe (external service; operator opt-in required)",
     promptGuidelines: [
       // The payload shape is what models get wrong on the first call; the same sample the playground edits is the cheapest way to show it.
+      // Every session pays for this line on every tool listing, so the sample stays short.
       `Request shape, all three question kinds in one call: ${JSON.stringify(sample)}`,
       "Use typesafe_evaluate only for requested semantic judgments, not calculations or exact lookups; send only the relevant permitted data.",
       "Batch independent typesafe_evaluate questions over the same state; use code or explicit permission rules for actions, never confidence as authorization.",

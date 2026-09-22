@@ -4,6 +4,12 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.6.2
+
+### Fixed
+
+- Describe every field the agent authors in the `typesafe_evaluate` schema (`state`, `questions`, `type`, `instructions`, `criteria`, `model`) and show one request payload in the prompt guidelines, so the first call no longer has to fail to learn the shape (#6, #7).
+
 ## 0.6.1
 
 ### Fixed

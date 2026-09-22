@@ -11,13 +11,13 @@ export const DEFAULT_MAX_QUESTIONS = 32;
 
 // The API accepts structured descriptions, not only strings. The schema is the only shape guidance the model gets
 // before its first call, so every field the agent authors says what it means.
-const entry = (options: { description?: string } = {}) => Type.Union([
+const entry = (description?: string) => Type.Union([
   Type.String(),
   Type.Null(),
   Type.Array(Type.Unknown()),
   Type.Record(Type.String(), Type.Unknown()),
-], options);
-const instructions = Type.Optional(entry({ description: "One judgment about the whole state, phrased as a question or a statement." }));
+], description === undefined ? {} : { description });
+const instructions = Type.Optional(entry("One judgment about the whole state, phrased as a question or a statement."));
 const question = Type.Union([
   Type.Object({
     type: Type.Literal("noul", { description: "Yes or no: the probability the instructions hold." }),
@@ -45,11 +45,11 @@ const question = Type.Union([
 
 /** The JSON schema used by both the Pi tool and the programmatic interface. */
 export const evaluationSchema = Type.Object({
-  state: entry({ description: "What to judge: text, or an object whose fields the questions name." }),
+  state: entry("What to judge: text, or an object whose fields the questions name."),
   questions: Type.Record(Type.String({ minLength: 1, maxLength: 100 }), question, {
     minProperties: 1,
     maxProperties: DEFAULT_MAX_QUESTIONS,
-    description: "Questions keyed by a short id — an object map, not an array: { \"urgent\": { type: \"noul\", instructions: ... } }.",
+    description: "Questions keyed by a short id, as an object map, not an array: { \"urgent\": { type: \"noul\", instructions: ... } }.",
   }),
   model: Type.Optional(Type.String({ minLength: 1, maxLength: 100, description: "Jev model id, e.g. jev-latest. Omit for the default." })),
 }, { additionalProperties: false });

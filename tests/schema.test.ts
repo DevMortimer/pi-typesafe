@@ -61,23 +61,25 @@ test("admission still rejects non-JSON state", () => {
   assert.throws(() => prepareEvaluationRequest({ state: { n: NaN }, questions: { yes: { type: "noul", instructions: "?" } } }), hasCode("validation"));
 });
 
-type Field = { description?: string };
-type Variant = { properties: { type: Field; instructions: Field; criteria: Field } };
-
 test("every field the agent authors carries a description, so a bare union is not its only guidance", () => {
-  const schema = evaluationSchema as unknown as {
-    properties: {
-      state: Field;
-      model: Field;
-      questions: Field & { patternProperties: { "^.*$": { anyOf: Variant[] } } };
-    };
+  // Walk the serialized schema rather than pin TypeBox's layout: collect every `properties` entry by name.
+  const authored = new Map<string, number>();
+  const undescribed: string[] = [];
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    const record = node as Record<string, unknown>;
+    if (record.properties && typeof record.properties === "object") {
+      for (const [name, field] of Object.entries(record.properties as Record<string, Record<string, unknown>>)) {
+        authored.set(name, (authored.get(name) ?? 0) + 1);
+        if (typeof field.description !== "string" || field.description.length === 0) undescribed.push(name);
+      }
+    }
+    Object.values(record).forEach(walk);
   };
-  const { state, model, questions } = schema.properties;
-  const variants = questions.patternProperties["^.*$"].anyOf;
-  assert.equal(variants.length, 3, "the schema must still offer noul, choice, and score");
-  const authored: Field[] = [
-    state, model, questions,
-    ...variants.flatMap(variant => [variant.properties.type, variant.properties.instructions, variant.properties.criteria]),
-  ];
-  for (const field of authored) assert.ok(field.description, "every authored field must say what it means");
+  walk(JSON.parse(JSON.stringify(evaluationSchema)));
+  assert.equal(authored.get("type"), 3, "the schema must still offer noul, choice, and score");
+  for (const name of ["state", "questions", "model", "instructions", "criteria"]) assert.ok(authored.has(name), `${name} is still authored`);
+  // `true` and `false` inside noul criteria are the only fields whose parent already explains them.
+  assert.deepEqual(undescribed.filter(name => name !== "true" && name !== "false"), [], "every authored field must say what it means");
 });
