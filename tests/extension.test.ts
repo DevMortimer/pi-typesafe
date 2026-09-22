@@ -84,6 +84,8 @@ test("Pi loads a tool, a slash command, and a result renderer without network ca
   const completions = await command.getArgumentCompletions?.("pla");
   assert.ok(completions?.some(item => item.value === "playground"));
   assert.ok(tool.definition.promptGuidelines?.some(text => /one question per item per dimension/.test(text)));
+  // Models that never saw a payload author questions as an array; the guidelines must show one.
+  assert.ok(tool.definition.promptGuidelines?.some(text => /"state":/.test(text) && !/\n/.test(text)));
   assert.ok(/named state field/.test(tool.definition.description));
 });
 

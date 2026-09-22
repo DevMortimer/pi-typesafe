@@ -70,6 +70,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     description: `Evaluate supplied state with independent Choice, Score, and Noul questions in one TypeSafe request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${disclosure} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${DEFAULT_MAX_INPUT_BYTES / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`,
     promptSnippet: "Ask batched structured questions with TypeSafe (external service; operator opt-in required)",
     promptGuidelines: [
+      // The payload shape is what models get wrong on the first call; the same sample the playground edits is the cheapest way to show it.
+      `Request shape, all three question kinds in one call: ${JSON.stringify(sample)}`,
       "Use typesafe_evaluate only for requested semantic judgments, not calculations or exact lookups; send only the relevant permitted data.",
       "Batch independent typesafe_evaluate questions over the same state; use code or explicit permission rules for actions, never confidence as authorization.",
       "When typesafe_evaluate judges several items, give each item a named state field and ask one question per item per dimension, naming the field in the instructions; one question over many items returns an unusable blend.",

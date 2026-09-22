@@ -9,43 +9,49 @@ export const DEFAULT_MAX_INPUT_BYTES = 65_536;
 /** Questions one request may ask. More than this needs `chunkEvaluationRequest`, which splits and fans out. */
 export const DEFAULT_MAX_QUESTIONS = 32;
 
-// The API accepts structured descriptions, not only strings.
-const entry = Type.Union([
+// The API accepts structured descriptions, not only strings. The schema is the only shape guidance the model gets
+// before its first call, so every field the agent authors says what it means.
+const entry = (options: { description?: string } = {}) => Type.Union([
   Type.String(),
   Type.Null(),
   Type.Array(Type.Unknown()),
   Type.Record(Type.String(), Type.Unknown()),
-]);
-const instructions = Type.Optional(entry);
+], options);
+const instructions = Type.Optional(entry({ description: "One judgment about the whole state, phrased as a question or a statement." }));
 const question = Type.Union([
   Type.Object({
-    type: Type.Literal("noul"),
+    type: Type.Literal("noul", { description: "Yes or no: the probability the instructions hold." }),
     instructions,
     criteria: Type.Optional(Type.Union([
       Type.Null(),
-      Type.Object({ true: Type.Optional(entry), false: Type.Optional(entry) }, { additionalProperties: false }),
-    ])),
+      Type.Object({ true: Type.Optional(entry()), false: Type.Optional(entry()) }, { additionalProperties: false }),
+    ], { description: "Optional: what counts as yes and what counts as no, { true, false }." })),
   }, { additionalProperties: false }),
   Type.Object({
-    type: Type.Literal("choice"),
+    type: Type.Literal("choice", { description: "Pick one criteria label." }),
     instructions,
-    criteria: Type.Record(Type.String({ minLength: 1, maxLength: 200 }), entry, { minProperties: 1, maxProperties: 64 }),
+    criteria: Type.Record(Type.String({ minLength: 1, maxLength: 200 }), entry(), {
+      minProperties: 1,
+      maxProperties: 64,
+      description: "The options as a map from label to when it applies: { billing: \"Charges and payments\", other: null }. 1–64 entries.",
+    }),
   }, { additionalProperties: false }),
   Type.Object({
-    type: Type.Literal("score"),
+    type: Type.Literal("score", { description: "Rate against the ordered criteria levels." }),
     instructions,
-    criteria: Type.Array(entry, { minItems: 2, maxItems: 32 }),
+    criteria: Type.Array(entry(), { minItems: 2, maxItems: 32, description: "Ordered rubric levels, lowest first: [\"neutral\", \"angry\"]. 2–32 levels." }),
   }, { additionalProperties: false }),
 ]);
 
 /** The JSON schema used by both the Pi tool and the programmatic interface. */
 export const evaluationSchema = Type.Object({
-  state: entry,
+  state: entry({ description: "What to judge: text, or an object whose fields the questions name." }),
   questions: Type.Record(Type.String({ minLength: 1, maxLength: 100 }), question, {
     minProperties: 1,
     maxProperties: DEFAULT_MAX_QUESTIONS,
+    description: "Questions keyed by a short id — an object map, not an array: { \"urgent\": { type: \"noul\", instructions: ... } }.",
   }),
-  model: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  model: Type.Optional(Type.String({ minLength: 1, maxLength: 100, description: "Jev model id, e.g. jev-latest. Omit for the default." })),
 }, { additionalProperties: false });
 
 const usage = `Expected { state, questions: { <id>: { type: "choice", instructions, criteria: { label: description|null } } | { type: "score", instructions, criteria: [level0, level1, ...] } | { type: "noul", instructions } } }; 1–${DEFAULT_MAX_QUESTIONS} questions, Choice 1–64 options, Score 2–32 levels.`;

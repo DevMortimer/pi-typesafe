@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_MAX_INPUT_BYTES, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
+  DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
 } from "../src/index.js";
 
 const hasCode = (code: string) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === code;
@@ -59,4 +59,25 @@ test("admission still rejects non-JSON state", () => {
   cycle.self = cycle;
   assert.throws(() => prepareEvaluationRequest({ state: cycle, questions: { yes: { type: "noul", instructions: "?" } } }), hasCode("validation"));
   assert.throws(() => prepareEvaluationRequest({ state: { n: NaN }, questions: { yes: { type: "noul", instructions: "?" } } }), hasCode("validation"));
+});
+
+type Field = { description?: string };
+type Variant = { properties: { type: Field; instructions: Field; criteria: Field } };
+
+test("every field the agent authors carries a description, so a bare union is not its only guidance", () => {
+  const schema = evaluationSchema as unknown as {
+    properties: {
+      state: Field;
+      model: Field;
+      questions: Field & { patternProperties: { "^.*$": { anyOf: Variant[] } } };
+    };
+  };
+  const { state, model, questions } = schema.properties;
+  const variants = questions.patternProperties["^.*$"].anyOf;
+  assert.equal(variants.length, 3, "the schema must still offer noul, choice, and score");
+  const authored: Field[] = [
+    state, model, questions,
+    ...variants.flatMap(variant => [variant.properties.type, variant.properties.instructions, variant.properties.criteria]),
+  ];
+  for (const field of authored) assert.ok(field.description, "every authored field must say what it means");
 });
