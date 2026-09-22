@@ -4,6 +4,21 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.7.0
+
+### Fixed
+
+- Key reporting and login can name the judgment backend: `keySituation(backend)`, `resolveApiKey(backend)`, `authState({ backend })`, and `ensureApiKey(ctx, { backend })` read the backend's own environment variable, `describeAuth` labels the key by backend and names the variable to set, and `AuthState` carries `backend`. Before, every surface reported the TypeSafe key, so an OpenRouter user saw "TypeSafe key: missing" while judgments ran, and `ensureApiKey` opened the TypeSafe login and verified the pasted key against api.typesafe.ai (#9).
+- `createTypeSafe({ backend: "openrouter" })` no longer falls back to `TYPESAFE_API_KEY` or the login store when `OPENROUTER_API_KEY` is unset; a TypeSafe key was being sent to OpenRouter.
+
+### Added
+
+- `DEFAULT_BACKEND` export and a `label` on every `DECISIONS_BACKENDS` entry.
+
+### Docs
+
+- Document the `backend` option, `DECISIONS_BACKENDS`, and which key each backend reads in the README and the API reference; the OpenRouter backend shipped in 0.6.0 without either.
+
 ## 0.6.2
 
 ### Fixed

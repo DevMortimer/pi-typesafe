@@ -1,4 +1,4 @@
-export { createTypeSafe, DEFAULT_MAX_REQUESTS, DECISIONS_BACKENDS } from "./client.js";
+export { createTypeSafe, DEFAULT_MAX_REQUESTS, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./client.js";
 export type {
   TypeSafe, TypeSafeOptions, EvaluationOptions, Evaluation, UsageSnapshot, SpendReport,
   TypeSafeBackend, BackendConfig,
