@@ -296,6 +296,49 @@ test("known backend is called at its full request URL", async () => {
   }
 });
 
+test("listModels asks each backend for its own model list", async () => {
+  const backends = [
+    ["typesafe", "https://api.typesafe.ai/v1/models", { models: [{ name: "jev-latest" }] }, ["jev-latest"]],
+    ["openrouter", "https://openrouter.ai/api/v1/models", { data: [{ id: "vendor/model", name: "Vendor: Model" }] }, ["Vendor: Model"]],
+  ] as const;
+  for (const [backend, expectedUrl, wire, expected] of backends) {
+    let capturedUrl = "";
+    const client = createTypeSafe({
+      apiKey: "test-key",
+      backend,
+      fetch: async (url) => { capturedUrl = String(url); return Response.json(wire); },
+    });
+    assert.deepEqual(await client.listModels(), expected);
+    assert.equal(capturedUrl, expectedUrl);
+  }
+});
+
+test("a model list without the backend's declared field keeps the SDK's own shape error", async () => {
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    backend: "openrouter",
+    fetch: async () => Response.json({ items: [{ name: "not the declared field" }] }),
+  });
+  await assert.rejects(client.listModels(), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.code, "response");
+    return true;
+  });
+});
+
+test("the model list is renamed only for the backend that declares another field", async () => {
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    backend: "typesafe",
+    fetch: async () => Response.json({ data: [{ name: "not the SDK's field" }] }),
+  });
+  await assert.rejects(client.listModels(), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.code, "response");
+    return true;
+  });
+});
+
 test("openrouter backend uses default model typesafe/jev-1.13", async () => {
   let sentModel: string | undefined;
   const client = createTypeSafe({

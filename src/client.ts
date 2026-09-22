@@ -2,7 +2,7 @@ import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
 import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import type { BackendConfig, TypeSafeBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
@@ -14,12 +14,39 @@ import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js
 export { DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, TypeSafeBackend } from "./backends.js";
 
-/** The path the SDK appends to whatever base URL it is given. */
+/** The paths the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
+const SDK_MODELS_PATH = "/v1/models";
 
-/** Send the SDK's fixed path to the backend's own, preserving any caller-supplied transport. */
-function backendFetch(path: string, inner: Fetch = fetch): Fetch {
-  return (input, init) => inner(String(input).replace(SDK_PATH, path), init);
+/**
+ * Send the SDK's fixed paths to the backend's own, preserving any caller-supplied transport. A backend that serves
+ * its model list under another path also gets that list renamed to the field the SDK reads.
+ */
+function backendFetch(backend: BackendConfig, inner: Fetch = fetch): Fetch {
+  const { path, modelsPath, modelsField } = backend;
+  return async (input, init) => {
+    const url = String(input);
+    const models = modelsPath !== undefined && url.includes(SDK_MODELS_PATH);
+    const rewrite = models ? modelsPath : path;
+    const response = await inner(rewrite === undefined ? url : url.replace(models ? SDK_MODELS_PATH : SDK_PATH, rewrite), init);
+    return models && modelsField !== undefined ? renameModelsField(response, modelsField) : response;
+  };
+}
+
+/**
+ * Hand the SDK the field it reads when a backend names the model list differently. Status and headers survive; a body
+ * without the declared field is passed through unchanged, so the SDK still reports its own shape error.
+ */
+async function renameModelsField(response: Response, field: string): Promise<Response> {
+  const text = await response.text();
+  let wire: unknown;
+  try { wire = JSON.parse(text); } catch { wire = undefined; }
+  const list = wire !== null && typeof wire === "object" ? (wire as Record<string, unknown>)[field] : undefined;
+  const headers = new Headers(response.headers);
+  // The body is replaced, so a copied length would describe the old one.
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return new Response(Array.isArray(list) ? JSON.stringify({ models: list }) : text, { status: response.status, statusText: response.statusText, headers });
 }
 
 export interface TypeSafeOptions {
@@ -148,7 +175,6 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const backendName: TypeSafeBackend = options.backend ?? DEFAULT_BACKEND;
   const backend = backendConfig(backendName);
   const baseURL = backend.host;
-  const backendPath = backend.path;
 
   if (!apiKey) {
     // The same resolution that authState() and ensureApiKey() report, so the status line and the request agree.
@@ -170,7 +196,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxInputTokensPerDay === undefined ? {} : { maxInputTokensPerDay: positiveInteger(options.maxInputTokensPerDay, "maxInputTokensPerDay") }),
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
-  const transport = backendPath ? backendFetch(backendPath, options.fetch) : options.fetch;
+  // A backend that serves its own paths gets a transport that rewrites them; the default backend keeps the caller's.
+  const transport = backend.path !== undefined || backend.modelsPath !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
   const model = options.model ?? (backendName === "openrouter" ? "typesafe/jev-1.13" : "jev-latest");
   if (typeof model !== "string" || !model.trim() || model.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   // Do not inherit SDK debug logging or alternate destinations from the environment.

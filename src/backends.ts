@@ -10,6 +10,10 @@ export interface BackendConfig {
   keyEnv?: string;
   /** Request path, when the backend does not serve the SDK's own `/v1/systemone`. */
   path?: string;
+  /** Request path for the model list, when the backend does not serve the SDK's own `/v1/models`. */
+  modelsPath?: string;
+  /** Field the model list arrives in, when the backend does not use the SDK's own `models`. */
+  modelsField?: string;
 }
 
 /** The backend every key and auth function assumes when none is named. */
@@ -21,7 +25,14 @@ export const TYPESAFE_KEY_ENV = "TYPESAFE_API_KEY";
 /** Registry of known judgment backends. Extendable by callers. */
 export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
   typesafe: { label: "TypeSafe", host: "https://api.typesafe.ai", keyEnv: TYPESAFE_KEY_ENV },
-  openrouter: { label: "OpenRouter", host: "https://openrouter.ai", keyEnv: "OPENROUTER_API_KEY", path: "/api/alpha/decisions" },
+  openrouter: {
+    label: "OpenRouter",
+    host: "https://openrouter.ai",
+    keyEnv: "OPENROUTER_API_KEY",
+    path: "/api/alpha/decisions",
+    modelsPath: "/api/v1/models",
+    modelsField: "data",
+  },
 };
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
