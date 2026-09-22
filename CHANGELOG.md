@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+<!-- Empty. Next release starts here. -->
+
+## 0.7.0
+
 ### Fixed
 
 - Key reporting and login can name the judgment backend: `keySituation(backend)`, `resolveApiKey(backend)`, `authState({ backend })`, and `ensureApiKey(ctx, { backend })` read the backend's own environment variable, `describeAuth` labels the key by backend and names the variable to set, and `AuthState` carries `backend`. Before, every surface reported the TypeSafe key, so an OpenRouter user saw "TypeSafe key: missing" while judgments ran, and `ensureApiKey` opened the TypeSafe login and verified the pasted key against api.typesafe.ai (#9).
