@@ -4,6 +4,18 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.7.1
+
+### Fixed
+
+- `listModels()` asks each backend for its own model list. It requested the SDK's `/v1/models` on every backend, so on OpenRouter it fetched an HTML page and always failed; it now uses `/api/v1/models` and reads the list from OpenRouter's `data` field (#11).
+- `listModels()` on OpenRouter returns model ids (`vendor/model`), the values `model:` accepts, instead of display names.
+- A public model list no longer proves a key. OpenRouter serves its list without checking the key, so a successful `listModels()` there leaves `authState({ backend: "openrouter" })` unverified rather than recording a garbage key as verified.
+
+### Added
+
+- `BackendConfig` gains optional `modelsPath`, `modelsField`, `modelsIdField`, and `modelsVerifyKey`, documented in the API reference.
+
 ## 0.7.0
 
 ### Fixed
