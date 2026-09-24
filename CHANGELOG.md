@@ -4,6 +4,12 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.7.3
+
+### Changed
+
+- Dependency updates: `typebox` 1.3.31 to 1.3.34 (runtime); `typescript` 6.0.3 to 7.0.2, `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` 0.85.1 to 0.86.1, `@types/node` 22.20.3 to 22.20.4, and `tsx` 4.23.13 to 4.23.15 (development). No change to the public API.
+
 ## 0.7.2
 
 ### Fixed
