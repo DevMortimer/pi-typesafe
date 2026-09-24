@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, TypeSafeIntegrationError } from "../src/index.js";
+import { safeError } from "../src/errors.js";
+import { APIError } from "@typesafe-ai/sdk";
 import type { Questions, SystemOneRequest } from "../src/index.js";
 
 export function responseFor(questions: Questions): Response {
@@ -184,6 +186,53 @@ test("HTTP errors are classified, never retried, and do not expose response secr
     });
     assert.equal(calls, 1);
   }
+});
+
+test("HTTP advice names the backend's key, covers 402, and quotes a numeric Retry-After", async () => {
+  const savedTypesafeKey = process.env.TYPESAFE_API_KEY;
+  const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  // authState({ backend }).usable needs a key present for each backend; the client itself takes its key below.
+  process.env.TYPESAFE_API_KEY = "offline-env-key-0123456789abcdef";
+  process.env.OPENROUTER_API_KEY = "offline-or-key-0123456789abcdef";
+  const cases = [
+    { backend: "typesafe", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made." },
+    { backend: "openrouter", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made." },
+    { backend: "typesafe", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Check your account balance. No automatic retry was made." },
+    { backend: "openrouter", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Insufficient credits. Add credits at https://openrouter.ai/credits. No automatic retry was made." },
+    { backend: "typesafe", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "openrouter", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "typesafe", status: 429, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. No automatic retry was made." },
+  ] as const;
+  try {
+    for (const c of cases) {
+      clearAuthState();
+      const client = createTypeSafe({
+        apiKey: "test-key",
+        backend: c.backend,
+        fetch: async () => Response.json({ error: { code: "x", message: "never-print-me" } }, { status: c.status, headers: c.retryAfter ? { "Retry-After": "7" } : {} }),
+      });
+      await assert.rejects(client.evaluate(sample()), error => {
+        assert.ok(error instanceof TypeSafeIntegrationError);
+        assert.equal(error.code, "http");
+        assert.equal(error.status, c.status);
+        assert.equal(error.message, c.message);
+        assert.equal(error.message.includes("never-print-me"), false);
+        return true;
+      });
+      // A 401 rejects the key; a 402 is billing, so it must leave it usable (REJECTED_STATUSES stays {401, 403}).
+      assert.equal(authState({ backend: c.backend }).usable, c.usable, `${c.backend} ${c.status}`);
+    }
+  } finally {
+    clearAuthState();
+    if (savedTypesafeKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTypesafeKey;
+    if (savedOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouterKey;
+  }
+});
+
+test("safeError keeps its one-argument form and defaults the key advice", () => {
+  const own = new TypeSafeIntegrationError("http", "kept", 401);
+  assert.equal(safeError(own), own);
+  assert.equal(safeError(new APIError(401, undefined, new Headers())).message, "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.");
 });
 
 test("cancellation before submission does not consume an attempt", async () => {
