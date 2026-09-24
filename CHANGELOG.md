@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+<!-- Empty. Next release starts here. -->
+
+## 0.7.4
+
+### Fixed
+
 - A bare Jev model id is mapped to the backend's own form before it is sent — on OpenRouter `jev-latest` goes as `~typesafe/jev-latest` and `jev-1.13` as `typesafe/jev-1.13`, for the client default and a per-request `model` alike — so OpenRouter no longer answers 400, and `/typesafe status` reports the model the configured backend actually sends.
 
 ## 0.7.3
