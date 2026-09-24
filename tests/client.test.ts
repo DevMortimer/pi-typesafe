@@ -281,7 +281,7 @@ test("client ignores SDK endpoint and logging environment overrides", async () =
 
 test("configuration errors are early and usage snapshots are detached", async () => {
   assert.throws(() => createTypeSafe({ apiKey: " " }), hasCode("configuration"));
-  for (const options of [{ timeoutMs: 0 }, { maxRequests: -1 }, { maxInputBytes: NaN }, { model: "" }]) {
+  for (const options of [{ timeoutMs: 0 }, { maxRequests: -1 }, { maxInputBytes: NaN }, { model: "" }, { model: "x".repeat(101) }]) {
     assert.throws(() => createTypeSafe({ apiKey: "test-key", ...options }), hasCode("configuration"));
   }
   const client = createTypeSafe({ apiKey: "test-key", fetch: async () => responseFor(sample().questions) });
@@ -400,19 +400,57 @@ test("a public model list leaves the auth state unverified", async () => {
   assert.equal(authState({ backend: "openrouter" }).verified, false);
 });
 
-test("openrouter backend uses default model typesafe/jev-1.13", async () => {
-  let sentModel: string | undefined;
-  const client = createTypeSafe({
-    apiKey: "test-key",
-    backend: "openrouter",
-    fetch: async (_url, init) => {
-      const body = JSON.parse(String(init?.body)) as { model?: string };
-      sentModel = body.model;
-      return responseFor(sample().questions);
-    },
-  });
-  await client.evaluate(sample());
-  assert.equal(sentModel, "typesafe/jev-1.13");
+test("the model in the request body is the backend's own id form", async () => {
+  const cases = [
+    ["openrouter", undefined, "typesafe/jev-1.13"],
+    ["openrouter", "jev-latest", "~typesafe/jev-latest"],
+    ["openrouter", "jev-1.13", "typesafe/jev-1.13"],
+    ["openrouter", "jev-1.13.0", "typesafe/jev-1.13"],
+    ["openrouter", "vendor/other", "vendor/other"],
+    ["typesafe", "jev-latest", "jev-latest"],
+  ] as const;
+  for (const [backend, requested, expected] of cases) {
+    let sentUrl = "";
+    let sentModel: string | undefined;
+    const client = createTypeSafe({
+      apiKey: "test-key",
+      backend,
+      ...(requested === undefined ? {} : { model: requested }),
+      fetch: async (url, init) => {
+        sentUrl = String(url);
+        const body = JSON.parse(String(init?.body)) as { model?: string };
+        sentModel = body.model;
+        return responseFor(sample().questions);
+      },
+    });
+    await client.evaluate(sample());
+    assert.equal(sentModel, expected);
+    // OpenRouter judgments travel to its own decisions path, so the mapped id is proven on the wire that uses it.
+    assert.equal(sentUrl, backend === "openrouter" ? "https://openrouter.ai/api/alpha/decisions" : "https://api.typesafe.ai/v1/systemone");
+  }
+});
+
+test("a per-request model gets the same mapping as the client default", async () => {
+  const cases = [
+    ["openrouter", "jev-latest", "~typesafe/jev-latest"],
+    ["openrouter", "jev-1.13", "typesafe/jev-1.13"],
+    ["openrouter", "vendor/other", "vendor/other"],
+    ["typesafe", "jev-latest", "jev-latest"],
+  ] as const;
+  for (const [backend, requested, expected] of cases) {
+    let sentModel: string | undefined;
+    const client = createTypeSafe({
+      apiKey: "test-key",
+      backend,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { model?: string };
+        sentModel = body.model;
+        return responseFor(sample().questions);
+      },
+    });
+    await client.evaluate({ ...sample(), model: requested });
+    assert.equal(sentModel, expected);
+  }
 });
 
 test("a TypeSafe key is never sent to another backend", () => {

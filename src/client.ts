@@ -1,7 +1,7 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, backendModelId, defaultModelId, usesTypesafeKey } from "./backends.js";
 import type { BackendConfig, TypeSafeBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
@@ -63,7 +63,7 @@ export interface TypeSafeOptions {
   apiKey?: string;
   /** Judgment backend. When omitted, routes to the default TypeSafe host. */
   backend?: TypeSafeBackend;
-  /** Defaults to jev-latest. No model is inferred from submitted content. */
+  /** Defaults to the backend's own default (`jev-latest`, `typesafe/jev-1.13` on OpenRouter); a bare Jev id is mapped to the backend's id form before sending. No model is inferred from submitted content. */
   model?: string;
   /** Per request. Default: 15 seconds. No automatic retries. */
   timeoutMs?: number;
@@ -207,8 +207,11 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   }, capsFromEnvironment());
   // A backend that serves its own paths gets a transport that rewrites them; the default backend keeps the caller's.
   const transport = backend.path !== undefined || backend.modelsPath !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
-  const model = options.model ?? (backendName === "openrouter" ? "typesafe/jev-1.13" : "jev-latest");
-  if (typeof model !== "string" || !model.trim() || model.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
+  // The caller's input is validated as written, then mapped to the backend's id form; omitting it sends the backend's
+  // own default, which the mapping leaves unchanged.
+  const requested = options.model ?? defaultModelId(backendName);
+  if (typeof requested !== "string" || !requested.trim() || requested.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
+  const model = backendModelId(backendName, requested);
   // Do not inherit SDK debug logging or alternate destinations from the environment.
   const client = new TypeSafeClient({
     apiKey,
@@ -256,7 +259,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     },
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
       const validated = prepareEvaluationRequest(input, { maxInputBytes });
-      const body = JSON.stringify({ ...validated, model: validated.model ?? model });
+      // A per-request model meets the same mapping as the client default; the schema already limited the caller's own id.
+      const body = JSON.stringify({ ...validated, model: validated.model === undefined ? model : backendModelId(backendName, validated.model) });
       assertWithinByteLimit(body, maxInputBytes);
       if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
       if (usage.requestsStarted >= maxRequests) {

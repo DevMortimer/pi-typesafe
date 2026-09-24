@@ -48,6 +48,32 @@ export function backendConfig(name: TypeSafeBackend): BackendConfig {
   return backend;
 }
 
+/** Each backend's default model id as the caller writes it, before mapping: OpenRouter pins a version, TypeSafe follows latest. */
+const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
+  typesafe: "jev-latest",
+  openrouter: "typesafe/jev-1.13",
+};
+
+/**
+ * The model id to send for a caller's `model` on this backend. OpenRouter routes a bare Jev id under the `typesafe`
+ * author: `jev-latest` becomes its alias form `~typesafe/jev-latest`, and a bare `jev-<major>.<minor>` — with or
+ * without TypeSafe direct's optional `.<patch>` segment — becomes `typesafe/jev-<major>.<minor>`. An id that already
+ * carries an author (`vendor/model`), a bare id this rule does not know, and every model on a backend without a
+ * mapping go through unchanged. Every mapped id contains `/`, so mapping an already-mapped id changes nothing.
+ */
+export function backendModelId(backend: TypeSafeBackend, model: string): string {
+  if (model.includes("/")) return model;
+  if (backend !== "openrouter") return model;
+  if (model === "jev-latest") return "~typesafe/jev-latest";
+  const version = /^jev-(\d+)\.(\d+)(?:\.\d+)?$/.exec(model);
+  return version === null ? model : `typesafe/jev-${version[1]}.${version[2]}`;
+}
+
+/** The model a client sends when the caller names none: the backend's own default, in the form that backend accepts. */
+export function defaultModelId(backend: TypeSafeBackend): string {
+  return backendModelId(backend, DEFAULT_MODEL[backend]);
+}
+
 /**
  * Whether a backend's key comes from the TypeSafe resolution (`TYPESAFE_API_KEY`, then the login store) or only from
  * its own environment variable. Only the TypeSafe backend has a login store; every other backend is environment-only.
