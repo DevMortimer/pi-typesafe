@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-<!-- Empty. Next release starts here. -->
+### Fixed
+
+- HTTP advice is backend-aware: `safeError(error, backend?)` names the backend's key variable on a 401 (`Check OPENROUTER_API_KEY.` on OpenRouter, `Check TYPESAFE_API_KEY.` by default), a 402 now says `Insufficient credits. Add credits at https://openrouter.ai/credits.` on OpenRouter and `Check your account balance.` elsewhere without marking the key unusable, and a 429 appends `Retry after <n> seconds.` when the response carries a numeric `Retry-After` header. One-argument `safeError` calls are unchanged.
 
 ## 0.7.1
 

@@ -251,7 +251,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         }
         return models.map(card => card?.name).filter((name): name is string => typeof name === "string" && name.length > 0 && name.length <= 100);
       } catch (error) {
-        throw safeError(error);
+        throw safeError(error, backend);
       }
     },
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
@@ -285,7 +285,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         }
         return { ...result, elapsedMs: Math.round(performance.now() - start) };
       } catch (error) {
-        const safe = safeError(error);
+        const safe = safeError(error, backend);
         // The request was submitted, so it counts even when it fails; the reason stays visible in `authState()`.
         usage.requestsFailed += 1;
         ledger.recordFailure();
