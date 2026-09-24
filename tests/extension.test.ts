@@ -107,6 +107,11 @@ test("setup and status never display the API key", async () => {
   assert.equal(notices.some(text => text.includes("offline-test-key")), false);
 });
 
+test("status names the model the configured backend actually sends", async () => {
+  await runCommand("status");
+  assert.ok(notices.at(-1)?.includes("Model: jev-latest."));
+});
+
 test("login refuses to shadow an environment key", async () => {
   await runCommand("login");
   assert.ok(notices.at(-1)?.includes("takes precedence"));
