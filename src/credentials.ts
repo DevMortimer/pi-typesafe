@@ -1,8 +1,8 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendSpec } from "./backends.js";
 import { TypeSafeIntegrationError } from "./errors.js";
 
 export type KeySource = "environment" | "stored";
@@ -64,9 +64,9 @@ export function readStoredApiKey(): string | undefined {
  * The TypeSafe backend reads `TYPESAFE_API_KEY`, then the login store. Every other backend reads only its own
  * environment variable, because the store holds a TypeSafe key and a login verifies against api.typesafe.ai.
  */
-export function keySituation(backend: TypeSafeBackend = DEFAULT_BACKEND): KeySituation {
-  const config = backendConfig(backend);
-  const keyEnv = config.keyEnv ?? TYPESAFE_KEY_ENV;
+export function keySituation(backend: BackendSpec = DEFAULT_BACKEND): KeySituation {
+  const config = resolveBackend(backend);
+  const keyEnv = config.keyEnv;
   const fromEnvironment = process.env[keyEnv]?.trim();
   if (fromEnvironment) return { kind: "environment", key: fromEnvironment, keyEnv };
   if (!usesTypesafeKey(config)) return { kind: "missing" };
@@ -97,7 +97,7 @@ export function keySourceLabel(situation: KeySituation): string {
  * store must not be read. New code should call keySituation() instead: same precedence, never throws, and the
  * "must not be read" case arrives as `unusable` with the reason.
  */
-export function resolveApiKey(backend: TypeSafeBackend = DEFAULT_BACKEND): { key: string; source: KeySource } | undefined {
+export function resolveApiKey(backend: BackendSpec = DEFAULT_BACKEND): { key: string; source: KeySource } | undefined {
   const situation = keySituation(backend);
   if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
   return situation.kind === "environment" || situation.kind === "stored" ? { key: situation.key, source: situation.kind } : undefined;
