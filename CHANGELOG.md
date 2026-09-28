@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+<!-- Empty. Next release starts here. -->
+
+## 0.8.0
+
 ### Added
 
 - A `commandcode` backend for the same Jev decisions protocol: `createTypeSafe({ backend: "commandcode" })` sends judgments to `api.commandcode.ai` under `/provider/v1/systemone` with the key from `COMMANDCODE_API_KEY` and the model `typesafe/jev`; its public model list does not verify a key.
