@@ -89,7 +89,11 @@ function writeState(path: string, state: { verifiedAt?: string; lastFailure?: Au
   }
 }
 
-/** What the key situation, the last outcome, and the clock add up to for one backend. Never throws. */
+/**
+ * What the key situation, the last outcome, and the clock add up to for a valid backend; it never throws for one. An
+ * invalid backend throws the same `configuration` error as resolveBackend(), so validate a user-supplied endpoint
+ * with resolveBackend() first.
+ */
 export function authState(options: { path?: string; backend?: BackendSpec } = {}): AuthState {
   const path = options.path ?? authStatePath();
   const backend = options.backend ?? DEFAULT_BACKEND;

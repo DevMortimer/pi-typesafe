@@ -211,6 +211,15 @@ test("backend must be a registry name or a backend object", () => {
   assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode.');
 });
 
+test("authState refuses an invalid backend instead of reporting a status", () => {
+  assert.throws(() => authState({ backend: { label: "x", host: "http://evil.example", keyEnv: "K" } }), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.code, "configuration");
+    assert.equal(error.message, "Backend host must be an absolute https: URL with no user info, path, query, or fragment (http: is allowed only for localhost, 127.0.0.0/8, and [::1]).");
+    return true;
+  });
+});
+
 // 4. Key isolation.
 
 test("an endpoint never reads TYPESAFE_API_KEY or the login store", () => {

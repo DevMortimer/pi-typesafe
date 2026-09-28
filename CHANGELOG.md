@@ -9,7 +9,7 @@
 ### Added
 
 - A `commandcode` backend for the same Jev decisions protocol: `createTypeSafe({ backend: "commandcode" })` sends judgments to `api.commandcode.ai` under `/provider/v1/systemone` with the key from `COMMANDCODE_API_KEY` and the model `typesafe/jev`; its public model list does not verify a key.
-- `backend` accepts a caller-supplied endpoint object wherever a backend name is accepted (`createTypeSafe`, `keySituation`, `resolveApiKey`, `authState`, `ensureApiKey`, `safeError`): an endpoint names its own `label`, `host`, `keyEnv`, and optionally `path`, `defaultModel`, and model-list fields, is validated on every call, never reads `TYPESAFE_API_KEY` or the login store, and is never added to the registry.
+- `backend` accepts a caller-supplied endpoint object wherever a backend name is accepted (`createTypeSafe`, `keySituation`, `resolveApiKey`, `authState`, `ensureApiKey`, `safeError`): an endpoint names its own `label`, `host`, `keyEnv`, and optionally `path`, `defaultModel`, and model-list fields, is validated on every call, never reads `TYPESAFE_API_KEY` or the login store, and is never added to the registry. An invalid backend makes `authState` and `keySituation` throw `configuration`; validate user input with `resolveBackend` first.
 - `resolveBackend(nameOrEndpoint)` resolves either form to the validated backend the client uses, and `backendHost(nameOrEndpoint)` reports the destination host for consent text, alongside the `BackendEndpoint`, `BackendSpec`, and `ResolvedBackend` types.
 - `TypeSafeBackend` now includes `"commandcode"`; a consumer with an exhaustive `switch` over it sees a new member.
 
