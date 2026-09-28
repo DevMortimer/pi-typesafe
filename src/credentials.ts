@@ -1,13 +1,16 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendSpec } from "./backends.js";
 import { TypeSafeIntegrationError } from "./errors.js";
 
 export type KeySource = "environment" | "stored";
 
-/** The complete, never-throwing answer to "which key is in effect". */
+/**
+ * The complete answer to "which key is in effect" for a valid backend: it never throws. An invalid backend — an
+ * unknown name or an endpoint object that fails validation — throws the same `configuration` error as resolveBackend.
+ */
 export type KeySituation =
   /** `keyEnv` names the variable that was read; absent means `TYPESAFE_API_KEY`. */
   | { readonly kind: "environment"; readonly key: string; readonly keyEnv?: string }
@@ -59,14 +62,16 @@ export function readStoredApiKey(): string | undefined {
 }
 
 /**
- * What the environment, the login store, and file permissions add up to right now for one judgment backend. Never
- * throws; the "unusable" kind carries the user-facing reason (a stored key that other local users can read).
+ * What the environment, the login store, and file permissions add up to right now for one judgment backend. A valid
+ * backend never throws: the "unusable" kind carries the user-facing reason (a stored key that other local users can
+ * read). An invalid backend — an unknown name or an endpoint object that fails validation — throws the same
+ * `configuration` error as resolveBackend(), so validate a user-supplied endpoint with resolveBackend() first.
  * The TypeSafe backend reads `TYPESAFE_API_KEY`, then the login store. Every other backend reads only its own
  * environment variable, because the store holds a TypeSafe key and a login verifies against api.typesafe.ai.
  */
-export function keySituation(backend: TypeSafeBackend = DEFAULT_BACKEND): KeySituation {
-  const config = backendConfig(backend);
-  const keyEnv = config.keyEnv ?? TYPESAFE_KEY_ENV;
+export function keySituation(backend: BackendSpec = DEFAULT_BACKEND): KeySituation {
+  const config = resolveBackend(backend);
+  const keyEnv = config.keyEnv;
   const fromEnvironment = process.env[keyEnv]?.trim();
   if (fromEnvironment) return { kind: "environment", key: fromEnvironment, keyEnv };
   if (!usesTypesafeKey(config)) return { kind: "missing" };
@@ -94,10 +99,11 @@ export function keySourceLabel(situation: KeySituation): string {
 /**
  * The pre-0.4.0 key interface, frozen for existing callers: environment first so CI and scripts stay explicit, the
  * stored key as the interactive default, `undefined` when no key is configured, and a `configuration` error when a
- * store must not be read. New code should call keySituation() instead: same precedence, never throws, and the
- * "must not be read" case arrives as `unusable` with the reason.
+ * store must not be read. New code should call keySituation() instead: same precedence, never throws for a valid
+ * backend (an invalid one throws resolveBackend's `configuration` error), and the "must not be read" case arrives as
+ * `unusable` with the reason.
  */
-export function resolveApiKey(backend: TypeSafeBackend = DEFAULT_BACKEND): { key: string; source: KeySource } | undefined {
+export function resolveApiKey(backend: BackendSpec = DEFAULT_BACKEND): { key: string; source: KeySource } | undefined {
   const situation = keySituation(backend);
   if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
   return situation.kind === "environment" || situation.kind === "stored" ? { key: situation.key, source: situation.kind } : undefined;

@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_BACKEND, backendConfig, usesTypesafeKey } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import { DEFAULT_BACKEND, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendSpec } from "./backends.js";
 import { createTypeSafe } from "./client.js";
 import { keySituation, normalizeApiKey, storeApiKey } from "./credentials.js";
 import type { KeySource } from "./credentials.js";
@@ -46,12 +46,12 @@ export type EnsureApiKeyResult =
  * (every backend except TypeSafe) throws `configuration` naming its environment variable instead of prompting, because
  * the prompt would verify the key against the wrong service and store it where the TypeSafe key lives.
  */
-export async function ensureApiKey(ctx: ExtensionCommandContext, options: { backend?: TypeSafeBackend } = {}): Promise<EnsureApiKeyResult | undefined> {
+export async function ensureApiKey(ctx: ExtensionCommandContext, options: { backend?: BackendSpec } = {}): Promise<EnsureApiKeyResult | undefined> {
   const backend = options.backend ?? DEFAULT_BACKEND;
   const situation = keySituation(backend);
   if (situation.kind === "environment" || situation.kind === "stored") return { source: situation.kind };
   if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
-  const config = backendConfig(backend);
+  const config = resolveBackend(backend);
   if (!usesTypesafeKey(config)) {
     throw new TypeSafeIntegrationError("configuration", `No ${config.label} key. Set ${config.keyEnv} in the environment; /typesafe login stores a TypeSafe key only.`);
   }

@@ -1,8 +1,8 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, backendModelId, defaultModelId, usesTypesafeKey } from "./backends.js";
-import type { BackendConfig, TypeSafeBackend } from "./backends.js";
+import { TYPESAFE_KEY_ENV, backendModelId, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendConfig, BackendSpec, ResolvedBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
@@ -11,8 +11,8 @@ import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationReques
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
-export { DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
-export type { BackendConfig, TypeSafeBackend } from "./backends.js";
+export { backendHost, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
+export type { BackendConfig, BackendEndpoint, BackendSpec, ResolvedBackend, TypeSafeBackend } from "./backends.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
@@ -61,8 +61,8 @@ async function translateModels(response: Response, backend: BackendConfig): Prom
 export interface TypeSafeOptions {
   /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
   apiKey?: string;
-  /** Judgment backend. When omitted, routes to the default TypeSafe host. */
-  backend?: TypeSafeBackend;
+  /** Judgment backend: a registry name or a caller-supplied endpoint. When omitted, routes to the default TypeSafe host. */
+  backend?: BackendSpec;
   /** Defaults to the backend's own default (`jev-latest`, `typesafe/jev-1.13` on OpenRouter); a bare Jev id is mapped to the backend's id form before sending. No model is inferred from submitted content. */
   model?: string;
   /** Per request. Default: 15 seconds. No automatic retries. */
@@ -180,14 +180,15 @@ function capsDescription(caps: SpendCaps): string {
 
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
+  const backend: ResolvedBackend = resolveBackend(options.backend);
   let apiKey = options.apiKey?.trim();
-  const backendName: TypeSafeBackend = options.backend ?? DEFAULT_BACKEND;
-  const backend = backendConfig(backendName);
   const baseURL = backend.host;
+  // Only a registry backend maps ids; a caller-supplied endpoint's model is sent as the caller wrote it.
+  const mapModel = (model: string): string => (backend.name === undefined ? model : backendModelId(backend.name, model));
 
   if (!apiKey) {
     // The same resolution that authState() and ensureApiKey() report, so the status line and the request agree.
-    const situation = keySituation(backendName);
+    const situation = keySituation(options.backend);
     if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
     if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
   }
@@ -209,9 +210,10 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const transport = backend.path !== undefined || backend.modelsPath !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
   // The caller's input is validated as written, then mapped to the backend's id form; omitting it sends the backend's
   // own default, which the mapping leaves unchanged.
-  const requested = options.model ?? defaultModelId(backendName);
+  const requested = options.model ?? backend.defaultModel;
+  if (requested === undefined) throw new TypeSafeIntegrationError("configuration", `Backend "${backend.label}" names no defaultModel; pass model to createTypeSafe.`);
   if (typeof requested !== "string" || !requested.trim() || requested.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
-  const model = backendModelId(backendName, requested);
+  const model = mapModel(requested);
   // Do not inherit SDK debug logging or alternate destinations from the environment.
   const client = new TypeSafeClient({
     apiKey,
@@ -248,7 +250,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         const models = await client.models.list(callOptions);
         if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected model list.");
         // A backend that serves its list publicly accepts any key, so a success there proves nothing about one.
-        if (backend.modelsVerifyKey !== false && !verificationRecorded) {
+        if (backend.modelsVerifyKey && !verificationRecorded) {
           verificationRecorded = true;
           recordAuthVerified();
         }
@@ -260,7 +262,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
       const validated = prepareEvaluationRequest(input, { maxInputBytes });
       // A per-request model meets the same mapping as the client default; the schema already limited the caller's own id.
-      const body = JSON.stringify({ ...validated, model: validated.model === undefined ? model : backendModelId(backendName, validated.model) });
+      const body = JSON.stringify({ ...validated, model: validated.model === undefined ? model : mapModel(validated.model) });
       assertWithinByteLimit(body, maxInputBytes);
       if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
       if (usage.requestsStarted >= maxRequests) {

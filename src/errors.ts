@@ -1,6 +1,6 @@
 import { APIError, APIConnectionError, APITimeoutError, APIUserAbortError } from "@typesafe-ai/sdk";
 import { DECISIONS_BACKENDS, TYPESAFE_KEY_ENV, backendConfig } from "./backends.js";
-import type { BackendConfig, TypeSafeBackend } from "./backends.js";
+import type { BackendConfig, BackendSpec } from "./backends.js";
 
 export type IntegrationErrorCode = "configuration" | "validation" | "budget" | "aborted" | "timeout" | "http" | "connection" | "response";
 
@@ -31,7 +31,7 @@ function retryAfterSeconds(error: APIError): number | undefined {
  * Classify an error into a message safe to display. `backend` names the key variable the 401 advice tells the user
  * to check and selects the 402 wording; omitting it keeps the one-argument call and assumes the default TypeSafe key.
  */
-export function safeError(error: unknown, backend?: TypeSafeBackend | BackendConfig): TypeSafeIntegrationError {
+export function safeError(error: unknown, backend?: BackendSpec | BackendConfig): TypeSafeIntegrationError {
   if (error instanceof TypeSafeIntegrationError) return error;
   if (error instanceof APIUserAbortError) return new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled; an already submitted request may still be billed.");
   if (error instanceof APITimeoutError) return new TypeSafeIntegrationError("timeout", "TypeSafe request timed out; it was not retried and may still be billed.");

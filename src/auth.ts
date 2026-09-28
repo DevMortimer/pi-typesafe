@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, backendConfig, usesTypesafeKey } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendSpec } from "./backends.js";
 import { credentialsPath, keySituation, keySourceLabel, piTypesafeDir } from "./credentials.js";
 import type { KeySource } from "./credentials.js";
 import { TypeSafeIntegrationError } from "./errors.js";
@@ -28,8 +28,8 @@ export interface AuthFailure {
  * that judgments will happen — an enabled extension with no key used to look identical to a working one.
  */
 export interface AuthState {
-  /** The judgment backend this state describes; each backend has its own key. */
-  readonly backend: TypeSafeBackend;
+  /** The judgment backend this state describes; each backend has its own key. Holds the value the caller passed. */
+  readonly backend: BackendSpec;
   /** Same kinds as KeySituation: where the key in effect comes from. */
   readonly kind: "environment" | "stored" | "missing" | "unusable";
   readonly source?: KeySource;
@@ -89,8 +89,12 @@ function writeState(path: string, state: { verifiedAt?: string; lastFailure?: Au
   }
 }
 
-/** What the key situation, the last outcome, and the clock add up to for one backend. Never throws. */
-export function authState(options: { path?: string; backend?: TypeSafeBackend } = {}): AuthState {
+/**
+ * What the key situation, the last outcome, and the clock add up to for a valid backend; it never throws for one. An
+ * invalid backend throws the same `configuration` error as resolveBackend(), so validate a user-supplied endpoint
+ * with resolveBackend() first.
+ */
+export function authState(options: { path?: string; backend?: BackendSpec } = {}): AuthState {
   const path = options.path ?? authStatePath();
   const backend = options.backend ?? DEFAULT_BACKEND;
   const situation = keySituation(backend);
@@ -146,7 +150,7 @@ export interface AuthReport {
  * state instead of reporting "enabled".
  */
 export function describeAuth(state: AuthState = authState()): AuthReport {
-  const config = backendConfig(state.backend ?? DEFAULT_BACKEND);
+  const config = resolveBackend(state.backend);
   const label = `${config.label} key`;
   const since = state.lastFailure ? ` Last failure: ${state.lastFailure.message}${state.lastFailure.at ? ` (${state.lastFailure.at})` : ""}` : "";
   if (state.kind === "missing") {
