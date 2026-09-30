@@ -123,6 +123,8 @@ Per request: 32 questions and 64 KiB of JSON. Per session: 20 attempts, 15-secon
 
 Import the library from your own extension. It has no dependency on Pi and is safe in tests.
 
+TypeBox is a required wildcard peer: Pi supplies it for managed extension installs; ordinary npm installs resolve it automatically. If your package manager does not install peers, install `typebox` alongside `pi-typesafe` for standalone use.
+
 ```ts
 import { ask, createTypeSafe, choice, noul, score } from "pi-typesafe";
 
