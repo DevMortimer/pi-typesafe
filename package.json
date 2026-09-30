@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "TypeSafe AI (Jev) decisions for Pi: batched Choice/Score/Noul evaluation tool, terminal playground, and a typed API other extensions build on.",
   "type": "module",
   "license": "MIT",
@@ -64,12 +64,12 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0",
-    "typebox": "^1.3.31"
+    "@typesafe-ai/sdk": "^0.6.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.85.1 <1",
-    "@earendil-works/pi-tui": ">=0.85.1 <1"
+    "@earendil-works/pi-tui": ">=0.85.1 <1",
+    "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
@@ -84,6 +84,7 @@
     "@earendil-works/pi-tui": "^0.86.1",
     "@types/node": "^22.0.0",
     "tsx": "^4.23.13",
+    "typebox": "^1.3.31",
     "typescript": "^7.0.2"
   }
 }

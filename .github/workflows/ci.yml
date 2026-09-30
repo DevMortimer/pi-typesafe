@@ -103,7 +103,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/package-smoke"
           printf '%s\n' '{"private":true,"type":"module"}' > "$RUNNER_TEMP/package-smoke/package.json"
           # Resolve dependencies as a consumer, without the checkout's lockfile or node_modules.
-          npm install --prefix "$RUNNER_TEMP/package-smoke" --ignore-scripts --omit=peer --no-audit --no-fund "$RUNNER_TEMP/package"/pi-typesafe-*.tgz
+          npm install --prefix "$RUNNER_TEMP/package-smoke" --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/package"/pi-typesafe-*.tgz
           cd "$RUNNER_TEMP/package-smoke"
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
@@ -119,7 +119,11 @@ jobs:
           const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
           assert.equal(metadata.name, 'pi-typesafe');
           for (const peer of Object.keys(metadata.peerDependencies)) {
-            assert.throws(() => import.meta.resolve(peer), { code: 'ERR_MODULE_NOT_FOUND' });
+            if (metadata.peerDependenciesMeta?.[peer]?.optional) {
+              assert.throws(() => import.meta.resolve(peer), { code: 'ERR_MODULE_NOT_FOUND' });
+            } else {
+              assert.ok(import.meta.resolve(peer), `Missing required library peer: ${peer}`);
+            }
           }
           const targets = Object.values(metadata.exports).flatMap(value => typeof value === 'string' ? [value] : Object.values(value));
           for (const target of [...targets, ...metadata.pi.extensions, 'README.md', 'LICENSE']) {

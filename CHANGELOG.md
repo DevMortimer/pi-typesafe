@@ -4,6 +4,12 @@
 
 <!-- Empty. Next release starts here. -->
 
+## 0.8.1
+
+### Fixed
+
+- Declare host-provided `typebox` as a wildcard peer instead of a runtime dependency, avoiding Pi's extension-loader warning (#21). Keep it required for standalone library consumers and available in development installs.
+
 ## 0.8.0
 
 ### Added
