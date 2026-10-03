@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0
+
 ### Added
 
 - A `liquid` backend for Liquid AI's decision models: `createTypeSafe({ backend: "liquid" })` sends judgments to `api.liquid.ai` under `/decisions/v1/systemone` with the key from `LIQUID_API_KEY`. The default model is `d1:free`, which is free; pass `model: "d1"` for the paid model, priced at $0.040 per million input tokens. Model ids go to Liquid unchanged. Its model list, under `/decisions/v1/models`, checks the key, so `listModels()` verifies it.
