@@ -1,8 +1,8 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
-import { TYPESAFE_KEY_ENV, backendModelId, resolveBackend, usesTypesafeKey } from "./backends.js";
-import type { BackendConfig, BackendSpec, ResolvedBackend } from "./backends.js";
+import { TYPESAFE_KEY_ENV, backendModelId, backendPrice, resolveBackend, usesTypesafeKey } from "./backends.js";
+import type { BackendConfig, BackendSpec, RegistryBackendConfig, ResolvedBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
@@ -11,8 +11,8 @@ import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationReques
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
-export { backendHost, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
-export type { BackendConfig, BackendEndpoint, BackendSpec, ResolvedBackend, TypeSafeBackend } from "./backends.js";
+export { backendHost, backendPrice, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
+export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
@@ -77,7 +77,7 @@ export interface TypeSafeOptions {
   maxInputTokensPerDay?: number;
   /** Estimated spend per local day, in US dollars. Unlimited by default. */
   maxUsdPerDay?: number;
-  /** Price used for the cost estimate and the USD cap. Default: DEFAULT_USD_PER_MTOK. */
+  /** Price in USD per million input tokens, used for every request's cost and the USD cap; 0 means free. Default: the backend's price for the model sent, else DEFAULT_USD_PER_MTOK. */
   usdPerMTok?: number;
   /** The usage ledger; defaults to the store next to the key. Injected by tests. */
   ledger?: UsageLedger;
@@ -102,6 +102,7 @@ export interface SpendReport {
   readonly session: UsageSnapshot;
   readonly today: UsageReport;
   readonly caps: SpendCaps;
+  /** The price of this client's default model. A request that names another model may be priced differently. */
   readonly usdPerMTok: number;
   readonly blocked?: BlockedCap;
 }
@@ -126,6 +127,13 @@ export const DEFAULT_MAX_REQUESTS = 20;
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeSafeIntegrationError("configuration", `${label} must be a positive safe integer.`);
+  }
+  return value;
+}
+
+function nonNegativeNumber(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new TypeSafeIntegrationError("configuration", `${label} must be a non-negative number.`);
   }
   return value;
 }
@@ -199,7 +207,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
   const maxInputBytes = positiveInteger(options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES, "maxInputBytes");
   const maxRequests = positiveInteger(options.maxRequests ?? DEFAULT_MAX_REQUESTS, "maxRequests");
-  const usdPerMTok = positiveNumber(options.usdPerMTok ?? DEFAULT_USD_PER_MTOK, "usdPerMTok");
+  const callerRate = options.usdPerMTok === undefined ? undefined : nonNegativeNumber(options.usdPerMTok, "usdPerMTok");
   const caps = mergeCaps({
     maxRequests,
     ...(options.maxRequestsPerDay === undefined ? {} : { maxRequestsPerDay: positiveInteger(options.maxRequestsPerDay, "maxRequestsPerDay") }),
@@ -224,13 +232,18 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     logLevel: "off",
     ...(transport ? { fetch: transport } : {}),
   });
-  const ledger = options.ledger ?? openUsageLedger({ usdPerMTok });
+  // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone.
+  const rateFor = (sent: string): number => callerRate ?? backendPrice(backend, sent) ?? DEFAULT_USD_PER_MTOK;
+  const usdPerMTok = rateFor(model);
+  // The ledger's own rate only estimates input tokens that carry no recorded cost, so it follows the caller's price alone.
+  const ledger = options.ledger ?? openUsageLedger(callerRate === undefined ? {} : { usdPerMTok: callerRate });
+  let sessionUsd = 0;
   const usage = { requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0 };
   // Auth state writes are deduplicated: one verification record per process, one record per distinct failure.
   let verificationRecorded = false;
   let lastFailureRecorded: string | undefined;
 
-  const snapshot = (): UsageSnapshot => ({ ...usage, estimatedUsd: estimateUsd(usage.inputTokens, usdPerMTok) });
+  const snapshot = (): UsageSnapshot => ({ ...usage, estimatedUsd: Math.round(sessionUsd * 1e6) / 1e6 });
   const blocked = (): BlockedCap | undefined => (usage.requestsStarted >= maxRequests ? undefined : ledger.blocked(caps));
 
   const typesafe: TypeSafe = {
@@ -262,7 +275,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
       const validated = prepareEvaluationRequest(input, { maxInputBytes });
       // A per-request model meets the same mapping as the client default; the schema already limited the caller's own id.
-      const body = JSON.stringify({ ...validated, model: validated.model === undefined ? model : mapModel(validated.model) });
+      const sentModel = validated.model === undefined ? model : mapModel(validated.model);
+      const body = JSON.stringify({ ...validated, model: sentModel });
       assertWithinByteLimit(body, maxInputBytes);
       if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
       if (usage.requestsStarted >= maxRequests) {
@@ -284,7 +298,10 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         usage.requestsSucceeded += 1;
         usage.inputTokens += result.usage.input_tokens;
         usage.outputTokens += result.usage.output_tokens;
-        ledger.recordSuccess(result.usage.input_tokens, result.usage.output_tokens);
+        // Unrounded: a small request must still count toward the cap.
+        const cost = (result.usage.input_tokens * rateFor(sentModel)) / 1e6;
+        sessionUsd += cost;
+        ledger.recordSuccess(result.usage.input_tokens, result.usage.output_tokens, cost);
         if (!verificationRecorded) {
           verificationRecorded = true;
           recordAuthVerified();

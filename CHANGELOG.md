@@ -2,7 +2,24 @@
 
 ## Unreleased
 
-<!-- Empty. Next release starts here. -->
+## 0.9.0
+
+### Added
+
+- A `liquid` backend for Liquid AI's decision models: `createTypeSafe({ backend: "liquid" })` sends judgments to `api.liquid.ai` under `/decisions/v1/systemone` with the key from `LIQUID_API_KEY`. The default model is `d1:free`, which is free; pass `model: "d1"` for the paid model, priced at $0.040 per million input tokens. Model ids go to Liquid unchanged. Its model list, under `/decisions/v1/models`, checks the key, so `listModels()` verifies it.
+- A registry backend can name a price per model (`prices`, USD per million input tokens by model id). A client with no `usdPerMTok` from its caller prices each request at its backend's price for the model it sends, and at `DEFAULT_USD_PER_MTOK` for a model with no price. `backendPrice(backend, model)` returns the registry price; `RegistryBackendConfig` is the new type of a registry entry.
+- `UsageLedger.recordSuccess` takes an optional third argument, the request's cost in USD.
+
+### Changed
+
+- `usdPerMTok` accepts `0`, for a free model.
+- The usage ledger records each request's cost at its own price, so the day's spend in reports and the `usdPerDay` cap stay right when one ledger holds requests to backends or models with different prices. Free requests add nothing to the spend. A ledger file written before this change keeps working: days without a recorded cost are estimated at the ledger's rate, as before.
+- `TypeSafeBackend` now includes `"liquid"`; a consumer with an exhaustive `switch` over it sees a new member.
+
+### Notes
+
+- Liquid counts the state once per question, where TypeSafe counts it once per request, so a request with N questions costs Liquid about N times the state. The same state of about 4,000 tokens with 3 questions was 4,301 input tokens on TypeSafe and 11,918 on Liquid.
+- Speed, measured on 2026-10-03 with one request at a time: `d1:free` took a median of about 14 seconds and sometimes failed with HTTP 504 after about 46 seconds; `d1` took about 0.5 seconds. With `d1:free`, raise `timeoutMs` above its 15-second default, or pass `model: "d1"`.
 
 ## 0.8.1
 

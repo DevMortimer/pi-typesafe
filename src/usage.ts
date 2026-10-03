@@ -46,9 +46,19 @@ export interface BlockedCap {
   readonly day: string;
 }
 
+/**
+ * One stored day. `costUsd` is the cost recorded request by request, at each request's own price, and
+ * `costedInputTokens` the input tokens it covers. A day written before costs were recorded has neither, so all of its
+ * input tokens are estimated at the ledger's rate.
+ */
+interface DayRecord extends UsageTotals {
+  readonly costUsd?: number;
+  readonly costedInputTokens?: number;
+}
+
 interface LedgerFile {
   readonly version: number;
-  readonly days: Record<string, UsageTotals>;
+  readonly days: Record<string, DayRecord>;
 }
 
 export function localDay(now: Date = new Date()): string {
@@ -85,14 +95,23 @@ function totalsOf(value: unknown): UsageTotals {
   };
 }
 
-function readDays(path: string): Record<string, UsageTotals> {
+function dayOf(value: unknown): DayRecord {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const costUsd = raw.costUsd;
+  const costedInputTokens = raw.costedInputTokens;
+  const costed = typeof costUsd === "number" && Number.isFinite(costUsd) && costUsd >= 0
+    && typeof costedInputTokens === "number" && Number.isSafeInteger(costedInputTokens) && costedInputTokens >= 0;
+  return costed ? { ...totalsOf(value), costUsd, costedInputTokens } : totalsOf(value);
+}
+
+function readDays(path: string): Record<string, DayRecord> {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     const days = parsed && typeof parsed === "object" ? (parsed as { days?: unknown }).days : undefined;
     if (!days || typeof days !== "object" || Array.isArray(days)) return {};
-    const result: Record<string, UsageTotals> = {};
+    const result: Record<string, DayRecord> = {};
     for (const [day, totals] of Object.entries(days as Record<string, unknown>)) {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) result[day] = totalsOf(totals);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) result[day] = dayOf(totals);
     }
     return result;
   } catch {
@@ -101,16 +120,16 @@ function readDays(path: string): Record<string, UsageTotals> {
   }
 }
 
-function keepRecent(days: Record<string, UsageTotals>, today: string): Record<string, UsageTotals> {
+function keepRecent(days: Record<string, DayRecord>, today: string): Record<string, DayRecord> {
   const names = Object.keys(days).sort();
-  const result: Record<string, UsageTotals> = {};
-  for (const name of names.slice(-KEEP_DAYS)) result[name] = days[name] as UsageTotals;
+  const result: Record<string, DayRecord> = {};
+  for (const name of names.slice(-KEEP_DAYS)) result[name] = days[name] as DayRecord;
   result[today] = days[today] ?? emptyTotals();
   return result;
 }
 
 /** Owner-only, atomic, and best-effort: a ledger this process cannot write never fails a request. */
-function writeDays(path: string, days: Record<string, UsageTotals>): void {
+function writeDays(path: string, days: Record<string, DayRecord>): void {
   const file: LedgerFile = { version: USAGE_VERSION, days };
   const temporary = `${path}.${process.pid}.tmp`;
   try {
@@ -161,6 +180,7 @@ export interface UsageLedgerOptions {
   path?: string;
   /** Clock for the local day and for rollover; injectable for tests. */
   now?: () => Date;
+  /** Rate for input tokens that have no recorded cost: requests recorded without one, and days from an older ledger file. Default: DEFAULT_USD_PER_MTOK. */
   usdPerMTok?: number;
 }
 
@@ -176,7 +196,8 @@ export interface UsageLedger {
   today(): UsageReport;
   /** Count the attempt before it is submitted; a request that never returns still counts. */
   recordStart(): void;
-  recordSuccess(inputTokens: number, outputTokens: number): void;
+  /** `usd` is this request's cost at its own price; without it the request is estimated at the ledger's rate. */
+  recordSuccess(inputTokens: number, outputTokens: number, usd?: number): void;
   recordFailure(): void;
   /** The reached day cap that blocks the next request, or undefined. The caller owns the caps. */
   blocked(caps: SpendCaps): BlockedCap | undefined;
@@ -187,13 +208,23 @@ export interface UsageLedger {
 export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
   const path = options.path ?? usagePath();
   const now = options.now ?? (() => new Date());
-  const usdPerMTok = options.usdPerMTok && options.usdPerMTok > 0 ? options.usdPerMTok : DEFAULT_USD_PER_MTOK;
+  const usdPerMTok = options.usdPerMTok !== undefined && Number.isFinite(options.usdPerMTok) && options.usdPerMTok >= 0 ? options.usdPerMTok : DEFAULT_USD_PER_MTOK;
   let day = localDay(now());
   let days = keepRecent(readDays(path), day);
-  let totals = days[day] as UsageTotals;
+  let totals = days[day] as DayRecord;
 
-  const report = (value: UsageTotals, name: string): UsageReport => ({
-    ...value, day: name, estimatedUsd: estimateUsd(value.inputTokens, usdPerMTok),
+  /** Recorded costs plus an estimate for the input tokens that have none. */
+  const costOf = (value: DayRecord): number =>
+    Math.round(((value.costUsd ?? 0) + estimateUsd(Math.max(0, value.inputTokens - (value.costedInputTokens ?? 0)), usdPerMTok)) * 1e6) / 1e6;
+
+  const report = (value: DayRecord, name: string): UsageReport => ({
+    requestsStarted: value.requestsStarted,
+    requestsSucceeded: value.requestsSucceeded,
+    requestsFailed: value.requestsFailed,
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    day: name,
+    estimatedUsd: costOf(value),
   });
 
   const save = () => {
@@ -209,7 +240,7 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
     days = keepRecent(days, day);
   };
 
-  const add = (delta: Partial<UsageTotals>) => {
+  const add = (delta: Partial<UsageTotals> & { costUsd?: number; costedInputTokens?: number }) => {
     roll();
     totals = {
       requestsStarted: totals.requestsStarted + (delta.requestsStarted ?? 0),
@@ -217,6 +248,10 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
       requestsFailed: totals.requestsFailed + (delta.requestsFailed ?? 0),
       inputTokens: totals.inputTokens + (delta.inputTokens ?? 0),
       outputTokens: totals.outputTokens + (delta.outputTokens ?? 0),
+      ...(delta.costUsd === undefined && totals.costUsd === undefined ? {} : {
+        costUsd: Math.round(((totals.costUsd ?? 0) + (delta.costUsd ?? 0)) * 1e12) / 1e12,
+        costedInputTokens: (totals.costedInputTokens ?? 0) + (delta.costedInputTokens ?? 0),
+      }),
     };
     save();
   };
@@ -226,18 +261,22 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
     usdPerMTok,
     today: () => { roll(); return report(totals, day); },
     recordStart: () => add({ requestsStarted: 1 }),
-    recordSuccess: (inputTokens, outputTokens) => add({
-      requestsSucceeded: 1,
-      inputTokens: Number.isSafeInteger(inputTokens) && inputTokens > 0 ? inputTokens : 0,
-      outputTokens: Number.isSafeInteger(outputTokens) && outputTokens > 0 ? outputTokens : 0,
-    }),
+    recordSuccess: (inputTokens, outputTokens, usd) => {
+      const input = Number.isSafeInteger(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+      add({
+        requestsSucceeded: 1,
+        inputTokens: input,
+        outputTokens: Number.isSafeInteger(outputTokens) && outputTokens > 0 ? outputTokens : 0,
+        ...(usd !== undefined && Number.isFinite(usd) && usd >= 0 ? { costUsd: usd, costedInputTokens: input } : {}),
+      });
+    },
     recordFailure: () => add({ requestsFailed: 1 }),
     blocked: (caps: SpendCaps) => {
       roll();
       const checks: Array<[BlockedCap["cap"], number | undefined, number]> = [
         ["requestsPerDay", caps.maxRequestsPerDay, totals.requestsStarted],
         ["inputTokensPerDay", caps.maxInputTokensPerDay, totals.inputTokens],
-        ["usdPerDay", caps.maxUsdPerDay, estimateUsd(totals.inputTokens, usdPerMTok)],
+        ["usdPerDay", caps.maxUsdPerDay, costOf(totals)],
       ];
       for (const [cap, limit, used] of checks) {
         if (limit !== undefined && used >= limit) return { cap, limit, used, day };

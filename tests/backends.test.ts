@@ -208,7 +208,7 @@ test("backend must be a registry name or a backend object", () => {
     assertRefuses(backend, "backend must be a registry name or a backend object.");
   }
   // An unknown name keeps the registry's own error.
-  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode.');
+  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode, liquid.');
 });
 
 test("authState refuses an invalid backend instead of reporting a status", () => {
