@@ -1,9 +1,9 @@
 import { TypeSafeIntegrationError } from "./errors.js";
 
-export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode";
+export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid";
 
 export interface BackendConfig {
-  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code". */
+  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI". */
   label: string;
   host: string;
   /** The environment variable that carries this backend's key. Absent means the TypeSafe key resolution applies. */
@@ -20,6 +20,12 @@ export interface BackendConfig {
   modelsVerifyKey?: boolean;
 }
 
+/** A registry entry: a backend config that can also name a price per model. Caller-supplied endpoints carry none. */
+export interface RegistryBackendConfig extends BackendConfig {
+  /** USD per million input tokens, by the model id as it is sent. A model with no entry is priced at DEFAULT_USD_PER_MTOK. */
+  prices?: Readonly<Record<string, number>>;
+}
+
 /** A caller-supplied endpoint that serves the Jev decisions protocol. Passed per call; never added to the registry. */
 export interface BackendEndpoint extends BackendConfig {
   /** Required. The environment variable with this endpoint's key. Must not be TYPESAFE_API_KEY. */
@@ -32,7 +38,7 @@ export interface BackendEndpoint extends BackendConfig {
 export type BackendSpec = TypeSafeBackend | BackendEndpoint;
 
 /** A backend resolved and validated: what the client will actually use. */
-export interface ResolvedBackend extends BackendConfig {
+export interface ResolvedBackend extends RegistryBackendConfig {
   /** Registry name, absent for a caller-supplied endpoint. */
   readonly name?: TypeSafeBackend;
   /** Origin only: scheme, host, and port. */
@@ -51,7 +57,7 @@ export const DEFAULT_BACKEND: TypeSafeBackend = "typesafe";
 export const TYPESAFE_KEY_ENV = "TYPESAFE_API_KEY";
 
 /** Registry of known judgment backends. Callers pass a `BackendEndpoint` for a host this registry does not name. */
-export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
+export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> = {
   typesafe: { label: "TypeSafe", host: "https://api.typesafe.ai", keyEnv: TYPESAFE_KEY_ENV },
   openrouter: {
     label: "OpenRouter",
@@ -73,10 +79,19 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, BackendConfig> = {
     modelsIdField: "id",
     modelsVerifyKey: false,
   },
+  liquid: {
+    label: "Liquid AI",
+    host: "https://api.liquid.ai",
+    keyEnv: "LIQUID_API_KEY",
+    path: "/decisions/v1/systemone",
+    modelsPath: "/decisions/v1/models",
+    modelsVerifyKey: true,
+    prices: { d1: 0.04, "d1:free": 0 },
+  },
 };
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
-export function backendConfig(name: TypeSafeBackend): BackendConfig {
+export function backendConfig(name: TypeSafeBackend): RegistryBackendConfig {
   const backend = DECISIONS_BACKENDS[name];
   if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${name}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
   return backend;
@@ -87,6 +102,7 @@ const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
   typesafe: "jev-latest",
   openrouter: "typesafe/jev-1.13",
   commandcode: "typesafe/jev",
+  liquid: "d1:free",
 };
 
 /**
@@ -107,6 +123,15 @@ export function backendModelId(backend: TypeSafeBackend, model: string): string 
 /** The model a client sends when the caller names none: the backend's own default, in the form that backend accepts. */
 export function defaultModelId(backend: TypeSafeBackend): string {
   return backendModelId(backend, DEFAULT_MODEL[backend]);
+}
+
+/**
+ * The registry's price for a model, in USD per million input tokens, or undefined when the backend names none.
+ * `model` is the id as sent. A caller-supplied endpoint has no prices.
+ */
+export function backendPrice(backend: ResolvedBackend, model: string): number | undefined {
+  const prices = backend.prices;
+  return prices !== undefined && Object.hasOwn(prices, model) ? prices[model] : undefined;
 }
 
 /**
