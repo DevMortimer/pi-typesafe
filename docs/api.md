@@ -85,7 +85,7 @@ Every item comes back as `{ ok: true, index, value }` or `{ ok: false, index, er
 
 `getUsage()` returns this client's session counters (`requestsStarted`, `requestsSucceeded`, `requestsFailed`, `inputTokens`, `outputTokens`, `estimatedUsd`). `getSpend()` adds today's persisted totals, the caps in force, and the cap currently reached.
 
-Day caps live in `~/.pi/agent/pi-typesafe/usage.json` (owner-only, atomic, best-effort: an unwritable ledger never fails a request) and roll over at local midnight.
+Day caps live in `~/.pi/agent/pi-typesafe/usage.json` (owner-only, atomic, best-effort: an unwritable ledger never fails a request) and roll over at local midnight. Every process that writes the ledger adds its counts to the file's current content under a lock file next to it (`usage.json.lock`), and `today()`, `blocked()`, and `describe()` read the file, so a day cap counts every process. An update waits at most 200 milliseconds for the lock; a lock older than 5 seconds belongs to a dead process and is taken over. A count that could not be written in time stays in the process and is added with its next update, or by `flush()`, which you can call before a process exits. Versions before 0.9.1 replace the whole file on each write and can still erase the counts of other processes.
 
 | Option | Environment | Bounds |
 | --- | --- | --- |

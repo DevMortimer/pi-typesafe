@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, localDay, mergeCaps, openUsageLedger, usagePath,
+  DEFAULT_USD_PER_MTOK, LOCK_STALE_MS, LOCK_WAIT_MS, capsFromEnvironment, estimateUsd, localDay, mergeCaps, openUsageLedger, usagePath,
 } from "../src/usage.js";
 
 const workspace = mkdtempSync(join(tmpdir(), "pi-typesafe-usage-"));
@@ -103,4 +104,120 @@ test("the default usage path sits with the key store", () => {
   } finally {
     if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = saved;
   }
+});
+
+const writer = join(import.meta.dirname, "helpers", "usage-writer.ts");
+
+/** Run one writer process to completion; they all start at `startAt`. */
+const runWriter = (path: string, iterations: number, startAt: number, usd: number) =>
+  new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", writer, path, String(iterations), String(startAt), String(usd)], { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`writer exited with ${code}`))));
+  });
+
+test("processes writing one ledger at the same time lose no count", async () => {
+  const path = ledgerPath("concurrent");
+  const processes = 4;
+  const iterations = 200; // Each iteration records a start and a success: 2 updates, so 1,600 updates in all.
+  const startAt = Date.now() + 1_500;
+  await Promise.all(Array.from({ length: processes }, () => runWriter(path, iterations, startAt, 0.000125)));
+  const today = openUsageLedger({ path }).today();
+  const total = processes * iterations;
+  assert.equal(today.requestsStarted, total);
+  assert.equal(today.requestsSucceeded, total);
+  assert.equal(today.inputTokens, total * 10);
+  assert.equal(today.outputTokens, total * 3);
+  assert.ok(Math.abs(today.estimatedUsd - total * 0.000125) < 1e-9, `costUsd ${today.estimatedUsd}`);
+  const file = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(file.version, 1);
+  assert.equal(file.days[localDay()].costedInputTokens, total * 10);
+  assert.ok(Math.abs(file.days[localDay()].costUsd - total * 0.000125) < 1e-9);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.equal(existsSync(`${path}.lock`), false);
+});
+
+test("a cap sees the usage another process recorded", async () => {
+  const path = ledgerPath("cross-process-cap");
+  const ledger = openUsageLedger({ path });
+  assert.equal(ledger.blocked({ maxRequestsPerDay: 3 }), undefined);
+  await runWriter(path, 3, 0, 0.0001);
+  // The ledger was opened before the other process wrote: it still reads the file, not a copy.
+  assert.equal(ledger.today().requestsStarted, 3);
+  assert.equal(ledger.blocked({ maxRequestsPerDay: 3 })?.cap, "requestsPerDay");
+  assert.equal(ledger.blocked({ maxInputTokensPerDay: 30 })?.cap, "inputTokensPerDay");
+  assert.equal(ledger.blocked({ maxUsdPerDay: 0.0003 })?.cap, "usdPerDay");
+  // This process adds to what the other one wrote instead of replacing it.
+  ledger.recordStart();
+  assert.equal(openUsageLedger({ path }).today().requestsStarted, 4);
+});
+
+test("a lock left by a dead process is taken over", () => {
+  const path = ledgerPath("stale-lock");
+  writeFileSync(`${path}.lock`, "");
+  const old = new Date(Date.now() - LOCK_STALE_MS - 5_000);
+  utimesSync(`${path}.lock`, old, old);
+  const ledger = openUsageLedger({ path });
+  const started = Date.now();
+  ledger.recordStart();
+  assert.ok(Date.now() - started < LOCK_WAIT_MS, "a stale lock must not delay the update");
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).days[localDay()].requestsStarted, 1);
+  assert.equal(existsSync(`${path}.lock`), false);
+});
+
+test("a held lock delays an update at most the bound, and the delta is added later", () => {
+  const path = ledgerPath("held-lock");
+  writeFileSync(`${path}.lock`, "");
+  const ledger = openUsageLedger({ path });
+  const started = Date.now();
+  ledger.recordStart();
+  const waited = Date.now() - started;
+  assert.ok(waited >= LOCK_WAIT_MS - 20, `waited ${waited} ms`);
+  assert.ok(waited < LOCK_WAIT_MS + 300, `waited ${waited} ms`);
+  // The holder's lock is untouched, the file has not been written, and this process still counts the request.
+  assert.equal(existsSync(`${path}.lock`), true);
+  assert.equal(existsSync(path), false);
+  assert.equal(ledger.today().requestsStarted, 1);
+  assert.equal(ledger.blocked({ maxRequestsPerDay: 1 })?.cap, "requestsPerDay");
+  rmSync(`${path}.lock`);
+  ledger.recordSuccess(40, 5, 0.001);
+  const day = JSON.parse(readFileSync(path, "utf8")).days[localDay()];
+  assert.equal(day.requestsStarted, 1);
+  assert.equal(day.requestsSucceeded, 1);
+  assert.equal(day.inputTokens, 40);
+  assert.equal(day.costUsd, 0.001);
+  assert.equal(existsSync(`${path}.lock`), false);
+});
+
+test("a held-back delta lands on the day it was recorded", () => {
+  let day = 8;
+  const path = ledgerPath("held-rollover");
+  const ledger = openUsageLedger({ path, now: () => at(day) });
+  writeFileSync(`${path}.lock`, "");
+  ledger.recordStart();
+  rmSync(`${path}.lock`);
+  day = 9;
+  ledger.recordFailure();
+  const file = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(file.days["2026-01-08"].requestsStarted, 1);
+  assert.equal(file.days["2026-01-09"].requestsFailed, 1);
+  assert.equal(file.days["2026-01-09"].requestsStarted, 0);
+});
+
+test("a ledger file written before costs were recorded is still read and extended", () => {
+  const path = ledgerPath("old-file");
+  writeFileSync(path, JSON.stringify({ version: 1, days: { "2026-01-10": { requestsStarted: 2, requestsSucceeded: 2, requestsFailed: 0, inputTokens: 1_000_000, outputTokens: 5 } } }));
+  const ledger = openUsageLedger({ path, now: at.bind(null, 10), usdPerMTok: 1 });
+  assert.equal(ledger.today().inputTokens, 1_000_000);
+  assert.equal(ledger.today().estimatedUsd, 1);
+  ledger.recordStart();
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).days["2026-01-10"].costUsd, undefined);
+  ledger.recordSuccess(500_000, 0, 0.25);
+  const day = JSON.parse(readFileSync(path, "utf8")).days["2026-01-10"];
+  assert.equal(day.requestsStarted, 3);
+  assert.equal(day.inputTokens, 1_500_000);
+  assert.equal(day.costUsd, 0.25);
+  assert.equal(day.costedInputTokens, 500_000);
+  // 1,000,000 old tokens at the ledger's rate plus the recorded 0.25.
+  assert.equal(ledger.today().estimatedUsd, 1.25);
 });
