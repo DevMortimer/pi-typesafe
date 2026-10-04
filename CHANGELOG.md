@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.1
+
 ### Fixed
 
 - The usage ledger lost counts when several processes ran at once. Each process read `usage.json` once and then wrote its own copy over the file, so the last writer won: in a test, 2 processes making 200 updates each left 200, not 400. The spend that `/typesafe status` reported fell short of the real use, and the `usdPerDay`, `requestsPerDay`, and `inputTokensPerDay` caps did not stop at their limit. Each update now adds its count to the file's current content under a lock file next to it, and `today()`, `blocked()`, and `describe()` read the file, so the caps count every process. An update waits at most 200 milliseconds for the lock, takes over a lock older than 5 seconds, and keeps a count it could not write until its next update. `UsageLedger.flush()` adds any such count at once. Older versions still replace the whole file on each write and can erase the counts of processes that run this one.
