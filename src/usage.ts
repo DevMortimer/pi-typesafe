@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { piTypesafeDir } from "./credentials.js";
 
@@ -104,9 +104,25 @@ function dayOf(value: unknown): DayRecord {
   return costed ? { ...totalsOf(value), costUsd, costedInputTokens } : totalsOf(value);
 }
 
-function readDays(path: string): Record<string, DayRecord> {
+/** Longest an update waits for the ledger lock. A request that cannot get it keeps its delta and adds it with the next update. */
+export const LOCK_WAIT_MS = 200;
+/** A lock this old belongs to a process that died while holding it; the next update takes it over. */
+export const LOCK_STALE_MS = 5_000;
+const LOCK_RETRY_MS = 2;
+
+/**
+ * The days stored in the file: `{}` for a missing or corrupt file, `undefined` when the file exists but cannot be read,
+ * so the caller never replaces a ledger it could not see.
+ */
+function readDays(path: string): Record<string, DayRecord> | undefined {
+  let text: string;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
     const days = parsed && typeof parsed === "object" ? (parsed as { days?: unknown }).days : undefined;
     if (!days || typeof days !== "object" || Array.isArray(days)) return {};
     const result: Record<string, DayRecord> = {};
@@ -115,7 +131,7 @@ function readDays(path: string): Record<string, DayRecord> {
     }
     return result;
   } catch {
-    // A missing, unreadable, or corrupt ledger restarts today's count; it never blocks a request.
+    // A corrupt ledger restarts the count; it never blocks a request.
     return {};
   }
 }
@@ -128,8 +144,23 @@ function keepRecent(days: Record<string, DayRecord>, today: string): Record<stri
   return result;
 }
 
-/** Owner-only, atomic, and best-effort: a ledger this process cannot write never fails a request. */
-function writeDays(path: string, days: Record<string, DayRecord>): void {
+/** `base` plus `delta`. Cost fields appear once either side has them, so a day from an older file stays as it was until a cost is recorded. */
+function addDay(base: DayRecord, delta: DayRecord): DayRecord {
+  return {
+    requestsStarted: base.requestsStarted + delta.requestsStarted,
+    requestsSucceeded: base.requestsSucceeded + delta.requestsSucceeded,
+    requestsFailed: base.requestsFailed + delta.requestsFailed,
+    inputTokens: base.inputTokens + delta.inputTokens,
+    outputTokens: base.outputTokens + delta.outputTokens,
+    ...(delta.costUsd === undefined && base.costUsd === undefined ? {} : {
+      costUsd: Math.round(((base.costUsd ?? 0) + (delta.costUsd ?? 0)) * 1e12) / 1e12,
+      costedInputTokens: (base.costedInputTokens ?? 0) + (delta.costedInputTokens ?? 0),
+    }),
+  };
+}
+
+/** Owner-only and atomic. Returns false when the file could not be written: a ledger this process cannot write never fails a request. */
+function writeDays(path: string, days: Record<string, DayRecord>): boolean {
   const file: LedgerFile = { version: USAGE_VERSION, days };
   const temporary = `${path}.${process.pid}.tmp`;
   try {
@@ -137,8 +168,47 @@ function writeDays(path: string, days: Record<string, DayRecord>): void {
     writeFileSync(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600, flag: "w" });
     chmodSync(temporary, 0o600);
     renameSync(temporary, path);
+    return true;
   } catch {
     try { rmSync(temporary, { force: true }); } catch { /* best-effort cleanup only */ }
+    return false;
+  }
+}
+
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Take the lock file next to the ledger, created exclusively. Waits at most LOCK_WAIT_MS; a lock older than
+ * LOCK_STALE_MS is taken over. Returns the release function, or undefined when the lock could not be taken.
+ */
+function takeLock(lock: string): (() => void) | undefined {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  try {
+    mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
+    for (;;) {
+      try {
+        closeSync(openSync(lock, "wx", 0o600));
+        return () => { try { unlinkSync(lock); } catch { /* already gone */ } };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return undefined;
+      }
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(lock);
+          continue;
+        }
+      } catch (error) {
+        // The holder released it, or another process took it over, between our open and our stat.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        continue;
+      }
+      if (Date.now() >= deadline) return undefined;
+      pause(LOCK_RETRY_MS);
+    }
+  } catch {
+    return undefined;
   }
 }
 
@@ -185,9 +255,11 @@ export interface UsageLedgerOptions {
 }
 
 /**
- * One day of persisted request, token, and cost totals, plus the caps that stop the next request. The in-memory copy is
- * authoritative for this process; the file is the cross-process, across-restart record. Reads are defensive, writes are
- * atomic and best-effort, and a day rolls over on the local date, so a long eval cannot accumulate forever unnoticed.
+ * One day of persisted request, token, and cost totals, plus the caps that stop the next request. The file is the
+ * record for every process: each update adds its delta to the file's current content under a lock, and `today()`,
+ * `blocked()`, and `describe()` read the file, so a cap counts every process that writes it. A delta that cannot be
+ * written in time (the lock is held, or the file is unwritable) stays in this process and is added with its next
+ * update. Reads are defensive, writes are atomic and best-effort, and a day rolls over on the local date.
  */
 export interface UsageLedger {
   readonly path: string;
@@ -203,15 +275,17 @@ export interface UsageLedger {
   blocked(caps: SpendCaps): BlockedCap | undefined;
   /** One line for status output: today's requests, tokens, and cost, with the caps that apply. */
   describe(caps?: SpendCaps): string;
+  /** Add to the file any delta this process still holds. Updates do this themselves; call it before the process exits. */
+  flush?(): void;
 }
 
 export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
   const path = options.path ?? usagePath();
+  const lock = `${path}.lock`;
   const now = options.now ?? (() => new Date());
   const usdPerMTok = options.usdPerMTok !== undefined && Number.isFinite(options.usdPerMTok) && options.usdPerMTok >= 0 ? options.usdPerMTok : DEFAULT_USD_PER_MTOK;
-  let day = localDay(now());
-  let days = keepRecent(readDays(path), day);
-  let totals = days[day] as DayRecord;
+  /** Deltas this process has recorded and the file does not hold yet, by day. */
+  let pending: Record<string, DayRecord> = {};
 
   /** Recorded costs plus an estimate for the input tokens that have none. */
   const costOf = (value: DayRecord): number =>
@@ -227,39 +301,38 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
     estimatedUsd: costOf(value),
   });
 
-  const save = () => {
-    days = keepRecent({ ...days, [day]: totals }, day);
-    writeDays(path, days);
+  /** The file's current content for today, plus whatever this process still holds. */
+  const current = (): { day: string; totals: DayRecord } => {
+    const day = localDay(now());
+    const stored = readDays(path)?.[day] ?? emptyTotals();
+    return { day, totals: pending[day] === undefined ? stored : addDay(stored, pending[day] as DayRecord) };
   };
 
-  const roll = () => {
-    const current = localDay(now());
-    if (current === day) return;
-    day = current;
-    totals = days[day] ?? emptyTotals();
-    days = keepRecent(days, day);
+  const flush = (): void => {
+    const owed = Object.entries(pending);
+    if (owed.length === 0) return;
+    const release = takeLock(lock);
+    if (!release) return;
+    try {
+      const stored = readDays(path);
+      if (!stored) return;
+      for (const [name, delta] of owed) stored[name] = addDay(stored[name] ?? emptyTotals(), delta);
+      if (writeDays(path, keepRecent(stored, localDay(now())))) pending = {};
+    } finally {
+      release();
+    }
   };
 
   const add = (delta: Partial<UsageTotals> & { costUsd?: number; costedInputTokens?: number }) => {
-    roll();
-    totals = {
-      requestsStarted: totals.requestsStarted + (delta.requestsStarted ?? 0),
-      requestsSucceeded: totals.requestsSucceeded + (delta.requestsSucceeded ?? 0),
-      requestsFailed: totals.requestsFailed + (delta.requestsFailed ?? 0),
-      inputTokens: totals.inputTokens + (delta.inputTokens ?? 0),
-      outputTokens: totals.outputTokens + (delta.outputTokens ?? 0),
-      ...(delta.costUsd === undefined && totals.costUsd === undefined ? {} : {
-        costUsd: Math.round(((totals.costUsd ?? 0) + (delta.costUsd ?? 0)) * 1e12) / 1e12,
-        costedInputTokens: (totals.costedInputTokens ?? 0) + (delta.costedInputTokens ?? 0),
-      }),
-    };
-    save();
+    const day = localDay(now());
+    pending[day] = addDay(pending[day] ?? emptyTotals(), { ...emptyTotals(), ...delta });
+    flush();
   };
 
   return {
     path,
     usdPerMTok,
-    today: () => { roll(); return report(totals, day); },
+    today: () => { const { day, totals } = current(); return report(totals, day); },
     recordStart: () => add({ requestsStarted: 1 }),
     recordSuccess: (inputTokens, outputTokens, usd) => {
       const input = Number.isSafeInteger(inputTokens) && inputTokens > 0 ? inputTokens : 0;
@@ -271,8 +344,9 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
       });
     },
     recordFailure: () => add({ requestsFailed: 1 }),
+    flush,
     blocked: (caps: SpendCaps) => {
-      roll();
+      const { day, totals } = current();
       const checks: Array<[BlockedCap["cap"], number | undefined, number]> = [
         ["requestsPerDay", caps.maxRequestsPerDay, totals.requestsStarted],
         ["inputTokensPerDay", caps.maxInputTokensPerDay, totals.inputTokens],
@@ -284,14 +358,14 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
       return undefined;
     },
     describe: (caps: SpendCaps = {}) => {
-      roll();
-      const current = report(totals, day);
+      const { day, totals } = current();
+      const today = report(totals, day);
       const limits = [
-        caps.maxRequestsPerDay === undefined ? undefined : `${current.requestsStarted}/${caps.maxRequestsPerDay} requests`,
-        caps.maxInputTokensPerDay === undefined ? undefined : `${current.inputTokens}/${caps.maxInputTokensPerDay} input tokens`,
-        caps.maxUsdPerDay === undefined ? undefined : `$${current.estimatedUsd.toFixed(4)}/$${caps.maxUsdPerDay.toFixed(2)}`,
+        caps.maxRequestsPerDay === undefined ? undefined : `${today.requestsStarted}/${caps.maxRequestsPerDay} requests`,
+        caps.maxInputTokensPerDay === undefined ? undefined : `${today.inputTokens}/${caps.maxInputTokensPerDay} input tokens`,
+        caps.maxUsdPerDay === undefined ? undefined : `$${today.estimatedUsd.toFixed(4)}/$${caps.maxUsdPerDay.toFixed(2)}`,
       ].filter((part): part is string => part !== undefined);
-      return `${current.requestsStarted} requests today (${current.requestsSucceeded} ok, ${current.requestsFailed} failed), ${current.inputTokens} input / ${current.outputTokens} output tokens, ~$${current.estimatedUsd.toFixed(4)}${limits.length ? `; caps ${limits.join(", ")}` : "; no daily cap"}`;
+      return `${today.requestsStarted} requests today (${today.requestsSucceeded} ok, ${today.requestsFailed} failed), ${today.inputTokens} input / ${today.outputTokens} output tokens, ~$${today.estimatedUsd.toFixed(4)}${limits.length ? `; caps ${limits.join(", ")}` : "; no daily cap"}`;
     },
   };
 }
