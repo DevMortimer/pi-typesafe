@@ -9,6 +9,21 @@ export const DEFAULT_MAX_INPUT_BYTES = 65_536;
 /** Questions one request may ask. More than this needs `chunkEvaluationRequest`, which splits and fans out. */
 export const DEFAULT_MAX_QUESTIONS = 32;
 
+/** What one request may ask on a backend. A backend can only narrow the schema's own bounds, never widen them. */
+export interface BackendLimits {
+  /** Questions in one request. */
+  readonly maxQuestions: number;
+  /** Options in one Choice question, at least. */
+  readonly minChoiceOptions: number;
+  /** Options in one Choice question, at most. */
+  readonly maxChoiceOptions: number;
+  /** Levels in one Score rubric, at most. */
+  readonly maxScoreLevels: number;
+}
+
+/** The schema's own bounds: the limits of a backend that declares none. */
+export const DEFAULT_BACKEND_LIMITS: BackendLimits = Object.freeze({ maxQuestions: DEFAULT_MAX_QUESTIONS, minChoiceOptions: 1, maxChoiceOptions: 64, maxScoreLevels: 32 });
+
 // The API accepts structured descriptions, not only strings. The schema is the only shape guidance the model gets
 // before its first call, so every field the agent authors says what it means.
 const entry = (description?: string) => Type.Union([
@@ -137,6 +152,30 @@ export function normalizeEvaluationRequest(value: unknown): unknown {
 export interface PrepareEvaluationOptions {
   /** UTF-8 JSON bytes of the serialized request. Default: DEFAULT_MAX_INPUT_BYTES. */
   maxInputBytes?: number;
+  /** The backend's limits, checked after the schema. Default: DEFAULT_BACKEND_LIMITS, which the schema already enforces. */
+  limits?: BackendLimits;
+}
+
+/** Counts only, never the submitted values: a request the schema accepts but the backend would refuse. */
+function assertWithinBackendLimits(request: SystemOneRequest, limits: BackendLimits): void {
+  const refuse = (detail: string): never => {
+    throw new TypeSafeIntegrationError("validation", `Evaluation exceeds the backend's limits: ${detail}`);
+  };
+  const questions = Object.entries(request.questions);
+  if (questions.length > limits.maxQuestions) {
+    refuse(`${questions.length} questions, at most ${limits.maxQuestions} per request. evaluateAll splits a request to this limit.`);
+  }
+  for (const [id, question] of questions) {
+    const where = `questions.${id.slice(0, 100)}`;
+    if (question.type === "choice") {
+      const options = Object.keys(question.criteria).length;
+      if (options < limits.minChoiceOptions || options > limits.maxChoiceOptions) {
+        refuse(`${where} has ${options} choice options; ${limits.minChoiceOptions}–${limits.maxChoiceOptions} allowed.`);
+      }
+    } else if (question.type === "score" && question.criteria.length > limits.maxScoreLevels) {
+      refuse(`${where} has ${question.criteria.length} score levels; 2–${limits.maxScoreLevels} allowed.`);
+    }
+  }
 }
 
 /** One byte rule for every limit check: measure the serialized request and name the configured limit. */
@@ -147,12 +186,13 @@ export function assertWithinByteLimit(text: string, maxInputBytes: number): void
 }
 
 /**
- * The one admission rule: normalize known near-miss aliases, validate the schema and JSON-safety, then enforce the byte
- * budget — always in that order. The Pi tool, the playground, and client.evaluate() all pass through here, so what one
- * accepts the others accept.
+ * The one admission rule: normalize known near-miss aliases, validate the schema and JSON-safety, check the backend's
+ * limits, then enforce the byte budget — always in that order. The Pi tool, the playground, and client.evaluate() all
+ * pass through here, so what one accepts the others accept.
  */
 export function prepareEvaluationRequest(value: unknown, options: PrepareEvaluationOptions = {}): SystemOneRequest {
   const validated = parseEvaluationRequest(normalizeEvaluationRequest(value));
+  if (options.limits !== undefined) assertWithinBackendLimits(validated, options.limits);
   assertWithinByteLimit(JSON.stringify(validated), options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES);
   return validated;
 }

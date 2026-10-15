@@ -114,6 +114,24 @@ test("more questions than one request may carry are split in order", () => {
   assert.equal(chunks.every(chunk => chunk.state === "many"), true);
 });
 
+test("chunkEvaluationRequest caps maxQuestions at the backend's question limit", () => {
+  const questions = manyQuestions(40);
+  const sizes = (options: Parameters<typeof chunkEvaluationRequest>[1]) => chunkEvaluationRequest({ state: "many", questions }, options).map(chunk => Object.keys(chunk.questions).length);
+  assert.deepEqual(sizes({ maxQuestions: 100 }), [DEFAULT_MAX_QUESTIONS, 40 - DEFAULT_MAX_QUESTIONS]);
+  assert.deepEqual(sizes({ backend: "subq" }), [16, 16, 8]);
+  assert.deepEqual(sizes({ backend: "subq", maxQuestions: 24 }), [16, 16, 8]);
+  assert.deepEqual(sizes({ backend: "subq", maxQuestions: 10 }), [10, 10, 10, 10]);
+  assert.deepEqual(sizes({ backend: "typesafe", maxQuestions: 24 }), [24, 16]);
+});
+
+test("evaluateAll caps a caller's maxQuestions at the client's question limit", async () => {
+  const counter = { calls: 0 };
+  const client = createTypeSafe({ ledger: ledgerFor("evaluate-all-cap"), fetch: answeringFetch(counter) });
+  const batch = await client.evaluateAll({ state: "many", questions: manyQuestions(40) }, { maxQuestions: 100 });
+  assert.equal(batch.ok, true);
+  assert.equal(counter.calls, 2);
+});
+
 test("evaluateAll spends one request per chunk and merges answers, usage, and model", async () => {
   const counter = { calls: 0 };
   const client = createTypeSafe({ ledger: ledgerFor("many"), fetch: answeringFetch(counter) });

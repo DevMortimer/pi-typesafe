@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import {
   authState, backendHost, clearAuthState, clearStoredApiKey, createTypeSafe, keySituation,
-  noul, resolveBackend, storeApiKey, TypeSafeIntegrationError,
+  noul, resolveBackend, score, storeApiKey, TypeSafeIntegrationError,
 } from "../src/index.js";
 import type { BackendEndpoint, BackendSpec, Questions } from "../src/index.js";
 import { safeError } from "../src/errors.js";
@@ -180,6 +180,42 @@ test("an endpoint modelsVerifyKey must be a boolean", () => {
   }
 });
 
+test("an endpoint limits must be whole numbers within the schema's bounds", () => {
+  const message = "Backend limits must be an object of whole numbers within the schema's bounds: maxQuestions 1–32, minChoiceOptions and maxChoiceOptions 1–64 with min at most max, maxScoreLevels 2–32.";
+  for (const limits of [7, null, [], { maxQuestions: 0 }, { maxQuestions: 33 }, { maxQuestions: 1.5 }, { maxQuestions: "16" }, { maxScoreLevels: 1 }, { maxScoreLevels: 33 }, { maxChoiceOptions: 65 }, { minChoiceOptions: 0 }, { minChoiceOptions: 5, maxChoiceOptions: 4 }, { maxTokens: 10 }]) {
+    assertRefuses({ label: "Gateway", host: "https://gw.example.com", keyEnv: "GATEWAY_JEV_KEY", defaultModel: "jev-latest", limits } as unknown as BackendSpec, message);
+  }
+  assert.deepEqual(resolveBackend(gateway).limits, { maxQuestions: 32, minChoiceOptions: 1, maxChoiceOptions: 64, maxScoreLevels: 32 });
+  assert.deepEqual(resolveBackend({ ...gateway, limits: { maxQuestions: 8, minChoiceOptions: 2 } }).limits, { maxQuestions: 8, minChoiceOptions: 2, maxChoiceOptions: 64, maxScoreLevels: 32 });
+});
+
+test("an endpoint's limits refuse a request before it is sent", async () => {
+  process.env.GATEWAY_JEV_KEY = gwKey;
+  let calls = 0;
+  const client = createTypeSafe({ backend: { ...gateway, limits: { maxQuestions: 2, maxScoreLevels: 3 } }, fetch: async (_url, init) => {
+    calls += 1;
+    return responseFor((JSON.parse(String(init?.body)) as { questions: Questions }).questions);
+  } });
+  assert.equal(client.limits?.maxQuestions, 2);
+  const three = { state: "s", questions: { a: noul("A?"), b: noul("B?"), c: noul("C?") } };
+  await assert.rejects(client.evaluate(three), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.code, "validation");
+    assert.equal(error.message, "Evaluation exceeds the backend's limits: 3 questions, at most 2 per request. evaluateAll splits a request to this limit.");
+    return true;
+  });
+  await assert.rejects(client.evaluate({ state: "s", questions: { level: score("How much?", ["a", "b", "c", "d"]) } }), (error: unknown) => {
+    assert.ok(error instanceof TypeSafeIntegrationError);
+    assert.equal(error.message, "Evaluation exceeds the backend's limits: questions.level has 4 score levels; 2–3 allowed.");
+    return true;
+  });
+  assert.equal(calls, 0);
+  assert.equal(client.getUsage().requestsStarted, 0);
+  const batch = await client.evaluateAll(three);
+  assert.equal(batch.ok, true);
+  assert.equal(calls, 2);
+});
+
 test("an endpoint keyEnv must name an environment variable", () => {
   for (const keyEnv of ["1BAD", "GATEWAY KEY", ""]) {
     assertRefuses({ label: "Gateway", host: "https://gw.example.com", keyEnv, defaultModel: "jev-latest" }, "Backend keyEnv must name an environment variable: letters, digits, and underscores, not starting with a digit.");
@@ -208,7 +244,7 @@ test("backend must be a registry name or a backend object", () => {
     assertRefuses(backend, "backend must be a registry name or a backend object.");
   }
   // An unknown name keeps the registry's own error.
-  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode, liquid.');
+  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode, liquid, subq.');
 });
 
 test("authState refuses an invalid backend instead of reporting a status", () => {

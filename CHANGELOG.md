@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- A `subq` backend for SubQ's decision model: `createTypeSafe({ backend: "subq" })` sends judgments to `api.subq.ai` under `/v1/systemone` with the key from `SUBQ_API_KEY`. The default model is `subq-snap-preview`, priced at $0.05 per million input tokens. Model ids go to SubQ unchanged. Its model list, under `/v1/models`, is public, so `listModels()` there does not verify the key.
+- Per-backend request limits. `BackendLimits` names the questions in one request, the options in one Choice, and the levels in one Score; `DEFAULT_BACKEND_LIMITS` holds the schema's bounds, which apply to a backend that declares none. A registry entry or a `BackendEndpoint` declares its own in `limits`, and no limit can be above the schema's bound. `subq` takes at most 16 questions, a Choice of at least 2 options, and a Score of at most 10 levels. `ResolvedBackend.limits` and `TypeSafe.limits` give the active backend's limits without a request.
+- `chunkEvaluationRequest` takes a `backend` option and chunks to that backend's question limit.
+
+### Changed
+
+- `evaluate`, `evaluateMany`, and `evaluateAll` refuse a request over the backend's limits before they send it, with a `validation` error. On `typesafe`, `openrouter`, `commandcode`, and `liquid` the limits are the schema's own, so nothing new is refused there.
+- `evaluateAll` chunks to the client's question limit, and `chunkEvaluationRequest` to the `backend` option's: 16 on `subq`, 32 elsewhere. A `maxQuestions` above the limit is now capped at it; before, `chunkEvaluationRequest` made chunks that larger, which the schema then refused.
+- `prepareEvaluationRequest` takes an optional `limits`.
+- A backend that names `modelsField` without `modelsPath` now has its model list renamed to the field the SDK reads; before, the field was ignored unless `modelsPath` was set too. No existing registry backend is affected.
+- `TypeSafeBackend` now includes `"subq"`; a consumer with an exhaustive `switch` over it sees a new member.
+
 ## 0.9.1
 
 ### Fixed
