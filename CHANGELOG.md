@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0
+
 ### Added
 
 - A `subq` backend for SubQ's decision model: `createTypeSafe({ backend: "subq" })` sends judgments to `api.subq.ai` under `/v1/systemone` with the key from `SUBQ_API_KEY`. The default model is `subq-snap-preview`, priced at $0.05 per million input tokens. Model ids go to SubQ unchanged. Its model list, under `/v1/models`, is public, so `listModels()` there does not verify the key.
