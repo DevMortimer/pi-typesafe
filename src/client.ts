@@ -8,6 +8,7 @@ import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationRequest } from "./schema.js";
+import type { BackendLimits } from "./schema.js";
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
@@ -26,7 +27,7 @@ function backendFetch(backend: BackendConfig, inner: Fetch = fetch): Fetch {
   const { path, modelsPath, modelsField } = backend;
   return async (input, init) => {
     const url = String(input);
-    const models = modelsPath !== undefined && url.includes(SDK_MODELS_PATH);
+    const models = (modelsPath !== undefined || modelsField !== undefined) && url.includes(SDK_MODELS_PATH);
     const rewrite = models ? modelsPath : path;
     const response = await inner(rewrite === undefined ? url : url.replace(models ? SDK_MODELS_PATH : SDK_PATH, rewrite), init);
     return models && modelsField !== undefined ? translateModels(response, backend) : response;
@@ -108,10 +109,12 @@ export interface SpendReport {
 }
 
 export interface TypeSafe {
+  /** What one request may ask on this client's backend; known without a request. Absent only on a hand-built TypeSafe, which gets the schema's bounds. */
+  readonly limits?: BackendLimits;
   evaluate<Q extends Questions>(request: SystemOneRequest<Q>, options?: EvaluationOptions): Promise<Evaluation<Q>>;
   /** Several requests with bounded concurrency; answers, usage, and model merged. Never throws. */
   evaluateMany<Q extends Questions>(requests: readonly SystemOneRequest<Q>[], options?: BatchOptions): Promise<BatchEvaluation<Q>>;
-  /** One state, any number of questions: chunk to the per-request limit, then fan out. Never throws. */
+  /** One state, any number of questions: chunk to the backend's question limit, then fan out. Never throws. */
   evaluateAll<Q extends Questions>(request: SystemOneRequest<Q>, options?: BatchOptions & { maxQuestions?: number }): Promise<BatchEvaluation<Q>>;
   /** Model names available to the account. Verifies the key; does not count toward maxRequests. */
   listModels(options?: EvaluationOptions): Promise<string[]>;
@@ -214,8 +217,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxInputTokensPerDay === undefined ? {} : { maxInputTokensPerDay: positiveInteger(options.maxInputTokensPerDay, "maxInputTokensPerDay") }),
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
-  // A backend that serves its own paths gets a transport that rewrites them; the default backend keeps the caller's.
-  const transport = backend.path !== undefined || backend.modelsPath !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
+  // A backend with its own paths or model list fields gets a transport that rewrites them; the default backend keeps the caller's.
+  const transport = backend.path !== undefined || backend.modelsPath !== undefined || backend.modelsField !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
   // The caller's input is validated as written, then mapped to the backend's id form; omitting it sends the backend's
   // own default, which the mapping leaves unchanged.
   const requested = options.model ?? backend.defaultModel;
@@ -247,6 +250,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const blocked = (): BlockedCap | undefined => (usage.requestsStarted >= maxRequests ? undefined : ledger.blocked(caps));
 
   const typesafe: TypeSafe = {
+    limits: backend.limits,
     getUsage: snapshot,
     getSpend: () => {
       const reached = blocked();
@@ -273,7 +277,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       }
     },
     async evaluate<Q extends Questions>(input: SystemOneRequest<Q>, callOptions: EvaluationOptions = {}): Promise<Evaluation<Q>> {
-      const validated = prepareEvaluationRequest(input, { maxInputBytes });
+      const validated = prepareEvaluationRequest(input, { maxInputBytes, limits: backend.limits });
       // A per-request model meets the same mapping as the client default; the schema already limited the caller's own id.
       const sentModel = validated.model === undefined ? model : mapModel(validated.model);
       const body = JSON.stringify({ ...validated, model: sentModel });

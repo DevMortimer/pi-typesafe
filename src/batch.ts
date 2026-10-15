@@ -1,7 +1,9 @@
 import type { Questions, SystemOneRequest, Usage } from "@typesafe-ai/sdk";
 import type { Evaluation, TypeSafe } from "./client.js";
 import { TypeSafeIntegrationError } from "./errors.js";
-import { DEFAULT_MAX_QUESTIONS, prepareEvaluationRequest } from "./schema.js";
+import { resolveBackend } from "./backends.js";
+import type { BackendSpec } from "./backends.js";
+import { DEFAULT_BACKEND_LIMITS, prepareEvaluationRequest } from "./schema.js";
 
 /** Default number of requests in flight. TypeSafe answers in isolation, so a small pool is enough. */
 export const DEFAULT_CONCURRENCY = 4;
@@ -133,17 +135,27 @@ export async function evaluateMany<Q extends Questions>(
   return summarize(results, Math.round(performance.now() - start));
 }
 
+/** A caller's chunk size, capped at the backend's question limit; the limit itself when the caller names none. */
+function chunkSize(maxQuestions: number | undefined, backendMax: number): number {
+  return Math.max(1, Math.min(backendMax, Math.floor(maxQuestions ?? backendMax)));
+}
+
 /**
- * Split a request that asks more questions than one request may carry into chunks of at most `maxQuestions`. Sharing
- * one state across several questions is one request; asking more than the per-request limit is the only reason to fan
- * out, and the state is repeated in each chunk. The order of `questions` is preserved. A pure splitter: admission still
- * happens once per chunk, in `evaluate` or `evaluateMany`, so what one accepts the others accept.
+ * Split a request that asks more questions than one request may carry into chunks of at most `maxQuestions`, capped at
+ * the question limit of `backend` (default: the TypeSafe backend). Sharing one state across several questions is one
+ * request; asking more than the per-request limit is the only reason to fan out, and the state is repeated in each
+ * chunk. The order of `questions` is preserved. A pure splitter: admission still happens once per chunk, in `evaluate`
+ * or `evaluateMany`, so what one accepts the others accept.
  */
 export function chunkEvaluationRequest(
   request: SystemOneRequest<Questions>,
-  options: { maxQuestions?: number } = {},
+  options: { maxQuestions?: number; backend?: BackendSpec } = {},
 ): SystemOneRequest<Questions>[] {
-  const limit = Math.max(1, Math.floor(options.maxQuestions ?? DEFAULT_MAX_QUESTIONS));
+  const limit = chunkSize(options.maxQuestions, resolveBackend(options.backend).limits.maxQuestions);
+  return splitQuestions(request, limit);
+}
+
+function splitQuestions(request: SystemOneRequest<Questions>, limit: number): SystemOneRequest<Questions>[] {
   const questions = request.questions as Record<string, unknown>;
   const entries = questions && typeof questions === "object" && !Array.isArray(questions) ? Object.entries(questions) : undefined;
   // Anything that is not a plain question map, or that already fits, is one chunk and is validated later.
@@ -157,14 +169,16 @@ export function chunkEvaluationRequest(
 }
 
 /**
- * Ask any number of questions about one state: chunk to the per-request limit, fan out, and merge the answers, usage,
- * and model. Use this when one coherent state carries many independent questions; use `evaluate` for one request.
+ * Ask any number of questions about one state: chunk to the client's question limit, or the caller's `maxQuestions`
+ * when smaller, fan out, and merge the answers, usage, and model. Use this when one coherent state carries many
+ * independent questions; use `evaluate` for one request.
  */
 export async function evaluateAll<Q extends Questions>(
   client: TypeSafe,
   request: SystemOneRequest<Q>,
   options: BatchOptions & { maxQuestions?: number } = {},
 ): Promise<BatchEvaluation<Q>> {
-  const chunks = chunkEvaluationRequest(request as SystemOneRequest<Questions>, options.maxQuestions === undefined ? {} : { maxQuestions: options.maxQuestions }) as SystemOneRequest<Q>[];
+  const limit = chunkSize(options.maxQuestions, (client.limits ?? DEFAULT_BACKEND_LIMITS).maxQuestions);
+  const chunks = splitQuestions(request as SystemOneRequest<Questions>, limit) as SystemOneRequest<Q>[];
   return evaluateMany(client, chunks, options);
 }

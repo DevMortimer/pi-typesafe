@@ -20,9 +20,9 @@ export type { BlockedCap, SpendCaps, UsageLedger, UsageLedgerOptions, UsageRepor
 export { TypeSafeIntegrationError } from "./errors.js";
 export type { IntegrationErrorCode } from "./errors.js";
 export {
-  DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
+  DEFAULT_BACKEND_LIMITS, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
 } from "./schema.js";
-export type { PrepareEvaluationOptions } from "./schema.js";
+export type { BackendLimits, PrepareEvaluationOptions } from "./schema.js";
 export { choice, noul, score } from "@typesafe-ai/sdk";
 export type {
   Questions, Question, SystemOneRequest, SystemOneResult, EntryType, JsonValue,

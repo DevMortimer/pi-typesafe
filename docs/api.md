@@ -24,8 +24,8 @@ result.answers.severity.score;   // 0..2, may be fractional
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `apiKey` | the backend's key (below) | Never returned |
-| `backend` | `typesafe` | `typesafe`, `openrouter`, `commandcode`, `liquid`, or a caller-supplied endpoint object; picks the host, the request path, the default model, and the key |
-| `model` | `jev-latest` (`typesafe/jev-1.13` on OpenRouter, `typesafe/jev` on Command Code, `d1:free` on Liquid AI) | No model is inferred from submitted content |
+| `backend` | `typesafe` | `typesafe`, `openrouter`, `commandcode`, `liquid`, `subq`, or a caller-supplied endpoint object; picks the host, the request path, the default model, the key, and the request limits |
+| `model` | `jev-latest` (`typesafe/jev-1.13` on OpenRouter, `typesafe/jev` on Command Code, `d1:free` on Liquid AI, `subq-snap-preview` on SubQ) | No model is inferred from submitted content |
 | `timeoutMs` | `15000` | Per request; no automatic retries. Liquid's `d1:free` is slow: see below |
 | `maxInputBytes` | `65536` | UTF-8 JSON bytes, not tokens |
 | `maxRequests` | `20` | Attempts per client instance, failures included |
@@ -36,7 +36,7 @@ result.answers.severity.score;   // 0..2, may be fractional
 
 A `model` is mapped to the backend's own id form before it is sent: on OpenRouter a bare `jev-latest` goes as `~typesafe/jev-latest` and a bare `jev-1.13` (or `jev-1.13.0`) as `typesafe/jev-1.13`, while an id that already carries an author, such as `vendor/other`, passes unchanged, and TypeSafe sends ids as written. The same mapping applies to a per-request `model` inside `evaluate()`; the limits of 1–100 characters apply to your own id, before mapping. A caller-supplied endpoint's model is never mapped: `defaultModel` and a per-request `model` go on the wire as the caller wrote them.
 
-`DECISIONS_BACKENDS` is the registry behind `backend`: `typesafe`, `openrouter`, `commandcode`, and `liquid`. Command Code serves the same Jev decisions protocol at `api.commandcode.ai` under `/provider/v1/systemone`, with the model id `typesafe/jev`; its model list is public, under `/provider/v1/models`, and arrives in `data` with ids in `id`. Each entry carries `label`, `host`, `keyEnv`, and, when the service does not serve the SDK's own paths, `path` for the judgment request plus `modelsPath`, `modelsField`, and `modelsIdField` for the model list — OpenRouter's and Command Code's lists are renamed to the `models` the SDK reads, with each entry's `id` promoted to the `name` that `listModels()` returns. `modelsVerifyKey: false` marks a backend whose model list is public, and therefore proves nothing about the key: both OpenRouter and Command Code serve theirs without checking one, so `listModels()` there leaves the auth state unverified while the answer check is unchanged and a malformed reply stays a `response` error. `DEFAULT_BACKEND` is `"typesafe"`.
+`DECISIONS_BACKENDS` is the registry behind `backend`: `typesafe`, `openrouter`, `commandcode`, `liquid`, and `subq`. Command Code serves the same Jev decisions protocol at `api.commandcode.ai` under `/provider/v1/systemone`, with the model id `typesafe/jev`; its model list is public, under `/provider/v1/models`, and arrives in `data` with ids in `id`. Each entry carries `label`, `host`, `keyEnv`, and, when the service does not serve the SDK's own paths, `path` for the judgment request plus `modelsPath`, `modelsField`, and `modelsIdField` for the model list — OpenRouter's and Command Code's lists are renamed to the `models` the SDK reads, with each entry's `id` promoted to the `name` that `listModels()` returns. `modelsVerifyKey: false` marks a backend whose model list is public, and therefore proves nothing about the key: both OpenRouter and Command Code serve theirs without checking one, so `listModels()` there leaves the auth state unverified while the answer check is unchanged and a malformed reply stays a `response` error. `DEFAULT_BACKEND` is `"typesafe"`.
 
 Liquid AI (`liquid`) serves the same protocol at `api.liquid.ai` under `/decisions/v1/systemone`, with the key from `LIQUID_API_KEY` sent as a bearer token. Its model list, under `/decisions/v1/models`, uses the SDK's own `models` and `name` fields and checks the key (`modelsVerifyKey: true`), so `listModels()` there verifies it. Model ids go to Liquid unchanged. The default model is `d1:free` (free, 32,000 tokens per question); pass `model: "d1"` for the paid model (65,536 tokens per question). A registry entry may carry `prices`, USD per million input tokens by the model id as sent; `liquid` names `d1` at `0.040` and `d1:free` at `0`. A client with no `usdPerMTok` from you prices each request at its backend's price for the model it sends, and at `0.042` when the backend names no price for that model. `backendPrice(backend, model)` returns that registry price.
 
@@ -44,7 +44,9 @@ Liquid counts the state once per question, where TypeSafe counts it once per req
 
 Speed, measured on 2026-10-03 with one request at a time: `d1:free` took a median of about 14 seconds and sometimes failed with HTTP 504 after about 46 seconds; `d1` took about 0.5 seconds. With `d1:free`, raise `timeoutMs` above its 15-second default, or pass `model: "d1"`.
 
-`backend` also accepts a caller-supplied endpoint object (`BackendEndpoint`) wherever a backend name is accepted — `createTypeSafe`, `keySituation`, `resolveApiKey`, `authState`, `ensureApiKey`, and `safeError`. An endpoint names `label`, `host`, and `keyEnv`, and optionally `path`, `modelsPath`, `modelsField`, `modelsIdField`, `modelsVerifyKey`, and `defaultModel`; it is validated on every call, never added to the registry, and without `defaultModel` requires `model` on `createTypeSafe`. `resolveBackend(nameOrEndpoint)` resolves either form to the validated `ResolvedBackend` the client uses (registry `name` when there is one, `host` as origin only, explicit `keyEnv` and `modelsVerifyKey`), and `backendHost(nameOrEndpoint)` returns just the destination host — `api.commandcode.ai`, `gw.example.com:8443` — for consent text. Validation is in this order, and every failure is a `configuration` error whose message never quotes a caller value (a host can carry credentials in its user info), except the label after it is validated:
+SubQ (`subq`) serves the same protocol at `api.subq.ai` under the SDK's own `/v1/systemone`, with the key from `SUBQ_API_KEY` sent as a bearer token. The default model is `subq-snap-preview`, priced at `0.05` USD per million input tokens; output is free. Model ids go to SubQ unchanged. Its model list, under `/v1/models`, is public (`modelsVerifyKey: false`) and arrives in `data` with ids in `id`, so `listModels()` there returns `subq-snap-preview` for any key and leaves the auth state unverified. SubQ accepts fewer questions in one request than TypeSafe: see [Limits](#limits).
+
+`backend` also accepts a caller-supplied endpoint object (`BackendEndpoint`) wherever a backend name is accepted — `createTypeSafe`, `keySituation`, `resolveApiKey`, `authState`, `ensureApiKey`, and `safeError`. An endpoint names `label`, `host`, and `keyEnv`, and optionally `path`, `modelsPath`, `modelsField`, `modelsIdField`, `modelsVerifyKey`, `limits`, and `defaultModel`; it is validated on every call, never added to the registry, and without `defaultModel` requires `model` on `createTypeSafe`. `resolveBackend(nameOrEndpoint)` resolves either form to the validated `ResolvedBackend` the client uses (registry `name` when there is one, `host` as origin only, explicit `keyEnv`, `modelsVerifyKey`, and `limits`), and `backendHost(nameOrEndpoint)` returns just the destination host — `api.commandcode.ai`, `gw.example.com:8443` — for consent text. Validation is in this order, and every failure is a `configuration` error whose message never quotes a caller value (a host can carry credentials in its user info), except the label after it is validated:
 
 | Rule | Refusal |
 | --- | --- |
@@ -54,6 +56,7 @@ Speed, measured on 2026-10-03 with one request at a time: `d1:free` took a media
 | `modelsPath`, same rule | `Backend modelsPath must be a string that starts with "/".` |
 | `modelsField` / `modelsIdField`, when present, nonempty strings | `Backend modelsField must be a nonempty string.` / `Backend modelsIdField must be a nonempty string.` |
 | `modelsVerifyKey`, when present, a boolean | `Backend modelsVerifyKey must be a boolean.` |
+| `limits`, when present, an object with only `maxQuestions` (1–32), `minChoiceOptions` and `maxChoiceOptions` (1–64, min at most max), `maxScoreLevels` (2–32), each a whole number | `Backend limits must be an object of whole numbers within the schema's bounds: …` |
 | `keyEnv` is a name of letters, digits, and underscores, not starting with a digit | `Backend keyEnv must name an environment variable: letters, digits, and underscores, not starting with a digit.` |
 | `keyEnv` is not `TYPESAFE_API_KEY` in any case | `Backend keyEnv must not be TYPESAFE_API_KEY: the TypeSafe key is only sent to the typesafe backend. Give this endpoint its own variable.` |
 | `defaultModel`, when present, trimmed nonempty, at most 100 characters | `Backend defaultModel must be a nonempty string of at most 100 characters.` |
@@ -66,17 +69,30 @@ The TypeSafe backend takes its key from `TYPESAFE_API_KEY`, then the `/typesafe 
 
 ## Admission
 
-`prepareEvaluationRequest(value, { maxInputBytes })` is the one admission rule, used by the tool, the playground, and `evaluate`. It normalizes the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), validates the schema and JSON-safety, then enforces the byte budget. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
+`prepareEvaluationRequest(value, { maxInputBytes, limits })` is the one admission rule, used by the tool, the playground, and `evaluate`. It normalizes the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), validates the schema and JSON-safety, checks `limits` when given, then enforces the byte budget. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
+
+## Limits
+
+A backend can accept less in one request than the schema allows. `BackendLimits` names what one request may ask: `maxQuestions`, `minChoiceOptions`, `maxChoiceOptions`, and `maxScoreLevels`. `DEFAULT_BACKEND_LIMITS` holds the schema's own bounds — 32 questions, 1–64 Choice options, 32 Score levels — and applies to every backend that declares none: `typesafe`, `openrouter`, `commandcode`, `liquid`, and an endpoint without `limits`.
+
+| Backend | Questions | Choice options | Score levels |
+| --- | --- | --- | --- |
+| `subq` | 1–16 | 2–64 | 2–10 |
+| every other registry backend | 1–32 | 1–64 | 2–32 |
+
+A registry entry or an endpoint declares its own in `limits`; a field it leaves out keeps the schema's bound, and no limit can be above it. Read the active backend's limits without a request from `client.limits` (absent only on a `TypeSafe` you build by hand) or `resolveBackend(nameOrEndpoint).limits`; `client.limits.maxQuestions` is 16 on `subq` and 32 on `typesafe`.
+
+`evaluate`, and so `evaluateMany` and `evaluateAll`, refuses a request over its backend's limits before it is sent, with a `validation` error that names the count and the limit: `Evaluation exceeds the backend's limits: 17 questions, at most 16 per request. evaluateAll splits a request to this limit.` The refused request does not count toward `maxRequests` or the daily caps.
 
 ## Batching
 
-`evaluate` is one request: up to 32 questions about one state. Both batching calls preserve input order, bound concurrency (`concurrency`, default 4), never throw, and stop submitting once a `budget` or cancellation failure appears.
+`evaluate` is one request: up to the backend's `maxQuestions` (32, or 16 on SubQ) questions about one state. Both batching calls preserve input order, bound concurrency (`concurrency`, default 4), never throw, and stop submitting once a `budget` or cancellation failure appears.
 
 | Call | Use |
 | --- | --- |
-| `evaluateAll(request)` | One state, any number of questions: chunks over 32 share the state, then merge into one `answers` map with usage summed |
+| `evaluateAll(request, { maxQuestions })` | One state, any number of questions: chunks of the client's `maxQuestions` limit (or your smaller `maxQuestions`; a larger one is capped) share the state, then merge into one `answers` map with usage summed |
 | `evaluateMany(requests)` | Several requests: per-request results plus merged answers, `failures`, `skipped` |
-| `chunkEvaluationRequest(request, { maxQuestions })` | The splitter alone; a pure function, no validation |
+| `chunkEvaluationRequest(request, { maxQuestions, backend })` | The splitter alone; a pure function, no validation. Chunks of the question limit of `backend` (default `typesafe`: 32), or your smaller `maxQuestions`; a larger one is capped |
 | `fanOut(items, worker, { concurrency, signal, stopOn })` | The pool underneath, for your own work |
 
 Every item comes back as `{ ok: true, index, value }` or `{ ok: false, index, error, skipped }`; `skipped` marks work that was never submitted.

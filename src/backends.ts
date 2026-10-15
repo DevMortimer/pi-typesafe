@@ -1,9 +1,11 @@
 import { TypeSafeIntegrationError } from "./errors.js";
+import { DEFAULT_BACKEND_LIMITS } from "./schema.js";
+import type { BackendLimits } from "./schema.js";
 
-export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid";
+export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid" | "subq";
 
 export interface BackendConfig {
-  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI". */
+  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI", "SubQ". */
   label: string;
   host: string;
   /** The environment variable that carries this backend's key. Absent means the TypeSafe key resolution applies. */
@@ -18,6 +20,8 @@ export interface BackendConfig {
   modelsIdField?: string;
   /** Whether the model list checks the key. A public list accepts any key, so it proves nothing. Absent means it does. */
   modelsVerifyKey?: boolean;
+  /** What one request may ask, where the backend accepts less than the schema. An absent field keeps the schema's bound. */
+  limits?: Readonly<Partial<BackendLimits>>;
 }
 
 /** A registry entry: a backend config that can also name a price per model. Caller-supplied endpoints carry none. */
@@ -48,6 +52,8 @@ export interface ResolvedBackend extends RegistryBackendConfig {
   readonly defaultModel?: string;
   /** Always explicit after resolution. */
   readonly modelsVerifyKey: boolean;
+  /** Every limit explicit: the backend's own, else the schema's bound. */
+  readonly limits: BackendLimits;
 }
 
 /** The backend every key and auth function assumes when none is named. */
@@ -88,6 +94,17 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     modelsVerifyKey: true,
     prices: { d1: 0.04, "d1:free": 0 },
   },
+  subq: {
+    label: "SubQ",
+    host: "https://api.subq.ai",
+    keyEnv: "SUBQ_API_KEY",
+    modelsField: "data",
+    modelsIdField: "id",
+    modelsVerifyKey: false,
+    // SubQ answers 422 to 17 questions, a 1-option Choice, or an 11-level Score. Its 255-option Choice cap is above the schema's 64.
+    limits: { maxQuestions: 16, minChoiceOptions: 2, maxScoreLevels: 10 },
+    prices: { "subq-snap-preview": 0.05 },
+  },
 };
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
@@ -103,6 +120,7 @@ const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
   openrouter: "typesafe/jev-1.13",
   commandcode: "typesafe/jev",
   liquid: "d1:free",
+  subq: "subq-snap-preview",
 };
 
 /**
@@ -154,6 +172,27 @@ function hasRawQueryOrFragment(value: string): boolean {
   return value.includes("?") || value.includes("#");
 }
 
+const LIMITS_MESSAGE = `Backend limits must be an object of whole numbers within the schema's bounds: maxQuestions 1–${DEFAULT_BACKEND_LIMITS.maxQuestions}, minChoiceOptions and maxChoiceOptions ${DEFAULT_BACKEND_LIMITS.minChoiceOptions}–${DEFAULT_BACKEND_LIMITS.maxChoiceOptions} with min at most max, maxScoreLevels 2–${DEFAULT_BACKEND_LIMITS.maxScoreLevels}.`;
+
+/** An endpoint's limits, each within the schema's bound: a backend can narrow what the schema admits, never widen it. */
+function resolveLimits(value: unknown): BackendLimits {
+  if (value === undefined) return { ...DEFAULT_BACKEND_LIMITS };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) refuse(LIMITS_MESSAGE);
+  const given = value as Record<string, unknown>;
+  const floors: Record<keyof BackendLimits, number> = { maxQuestions: 1, minChoiceOptions: DEFAULT_BACKEND_LIMITS.minChoiceOptions, maxChoiceOptions: DEFAULT_BACKEND_LIMITS.minChoiceOptions, maxScoreLevels: 2 };
+  const ceilings: Record<keyof BackendLimits, number> = { ...DEFAULT_BACKEND_LIMITS, minChoiceOptions: DEFAULT_BACKEND_LIMITS.maxChoiceOptions };
+  for (const key of Object.keys(given)) if (!Object.hasOwn(floors, key)) refuse(LIMITS_MESSAGE);
+  const limits: Record<keyof BackendLimits, number> = { ...DEFAULT_BACKEND_LIMITS };
+  for (const key of Object.keys(floors) as (keyof BackendLimits)[]) {
+    const field = given[key];
+    if (field === undefined) continue;
+    if (typeof field !== "number" || !Number.isInteger(field) || field < floors[key] || field > ceilings[key]) refuse(LIMITS_MESSAGE);
+    limits[key] = field;
+  }
+  if (limits.minChoiceOptions > limits.maxChoiceOptions) refuse(LIMITS_MESSAGE);
+  return limits;
+}
+
 /**
  * Resolve a registry name or a caller-supplied endpoint into the validated form the client uses. A name resolves to
  * its registry entry unchanged; an endpoint is validated field by field and returned as a fresh object whose `host`
@@ -171,6 +210,7 @@ export function resolveBackend(backend?: BackendSpec): ResolvedBackend {
       keyEnv: entry.keyEnv ?? TYPESAFE_KEY_ENV,
       defaultModel: defaultModelId(spec),
       modelsVerifyKey: entry.modelsVerifyKey !== false,
+      limits: { ...DEFAULT_BACKEND_LIMITS, ...entry.limits },
     };
   }
   if (spec === null || typeof spec !== "object") {
@@ -195,6 +235,7 @@ export function resolveBackend(backend?: BackendSpec): ResolvedBackend {
   if (spec.modelsField !== undefined && (typeof spec.modelsField !== "string" || !spec.modelsField)) refuse("Backend modelsField must be a nonempty string.");
   if (spec.modelsIdField !== undefined && (typeof spec.modelsIdField !== "string" || !spec.modelsIdField)) refuse("Backend modelsIdField must be a nonempty string.");
   if (spec.modelsVerifyKey !== undefined && typeof spec.modelsVerifyKey !== "boolean") refuse("Backend modelsVerifyKey must be a boolean.");
+  const limits = resolveLimits(spec.limits);
   if (typeof spec.keyEnv !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(spec.keyEnv)) refuse(KEY_ENV_MESSAGE);
   if (spec.keyEnv.toUpperCase() === TYPESAFE_KEY_ENV) {
     refuse("Backend keyEnv must not be TYPESAFE_API_KEY: the TypeSafe key is only sent to the typesafe backend. Give this endpoint its own variable.");
@@ -207,6 +248,7 @@ export function resolveBackend(backend?: BackendSpec): ResolvedBackend {
     host: host.origin,
     keyEnv: spec.keyEnv,
     modelsVerifyKey: spec.modelsVerifyKey === true,
+    limits,
     ...(spec.path === undefined ? {} : { path: spec.path }),
     ...(spec.modelsPath === undefined ? {} : { modelsPath: spec.modelsPath }),
     ...(spec.modelsField === undefined ? {} : { modelsField: spec.modelsField }),
