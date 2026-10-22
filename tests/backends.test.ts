@@ -6,6 +6,7 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   authState, backendHost, clearAuthState, clearStoredApiKey, createTypeSafe, keySituation,
   noul, resolveBackend, score, storeApiKey, TypeSafeIntegrationError,
+  BACKEND_ENV, MODEL_ENV, backendFromEnvironment, modelFromEnvironment,
 } from "../src/index.js";
 import type { BackendEndpoint, BackendSpec, Questions } from "../src/index.js";
 import { safeError } from "../src/errors.js";
@@ -404,6 +405,31 @@ test("resolveBackend resolves registry names to the registry entries", () => {
   assert.equal(commandcode.defaultModel, "typesafe/jev");
   assert.equal(commandcode.modelsVerifyKey, false);
   assert.deepEqual(resolveBackend("openrouter").defaultModel, "typesafe/jev-1.13");
+});
+
+test("backendFromEnvironment reads PI_TYPESAFE_BACKEND and default only when unset", () => {
+  assert.equal(backendFromEnvironment({}), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "" }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "   " }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "typesafe" }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: " openrouter " }), "openrouter");
+  for (const name of ["openrouter", "commandcode", "liquid", "subq"] as const) {
+    assert.equal(backendFromEnvironment({ [BACKEND_ENV]: name }), name);
+  }
+  // A typo must fail loudly at startup rather than send judgments somewhere unintended.
+  assert.throws(
+    () => backendFromEnvironment({ [BACKEND_ENV]: "open-router" }),
+    (error: unknown) => error instanceof TypeSafeIntegrationError
+      && error.code === "configuration"
+      && /Unknown judgment backend "open-router"/.test(error.message),
+  );
+});
+
+test("modelFromEnvironment reads PI_TYPESAFE_MODEL and leaves the backend default alone when unset", () => {
+  assert.equal(modelFromEnvironment({}), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: "" }), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: "  " }), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: " jev-1.14 " }), "jev-1.14");
 });
 
 test("backendHost reports the destination host", () => {

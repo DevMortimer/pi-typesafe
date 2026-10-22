@@ -12,7 +12,7 @@ import type { BackendLimits } from "./schema.js";
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
-export { backendHost, backendPrice, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
+export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */

@@ -114,6 +114,32 @@ export function backendConfig(name: TypeSafeBackend): RegistryBackendConfig {
   return backend;
 }
 
+/** The environment variable naming the judgment backend a Pi session uses; unset means `typesafe`. */
+export const BACKEND_ENV = "PI_TYPESAFE_BACKEND";
+
+/** The environment variable overriding the backend's default model; unset sends the backend's own default. */
+export const MODEL_ENV = "PI_TYPESAFE_MODEL";
+
+/**
+ * The backend a Pi session uses, from `PI_TYPESAFE_BACKEND`. An unset or blank variable means the default backend; a
+ * name the registry does not know is a `configuration` error naming the valid names, so a typo fails loudly at
+ * session start instead of silently sending judgments to a host the operator did not choose.
+ */
+export function backendFromEnvironment(env: NodeJS.ProcessEnv = process.env): TypeSafeBackend {
+  const name = env[BACKEND_ENV]?.trim();
+  if (!name) return DEFAULT_BACKEND;
+  backendConfig(name as TypeSafeBackend);
+  return name as TypeSafeBackend;
+}
+
+/**
+ * The model the Pi session sends, from `PI_TYPESAFE_MODEL`; `undefined` when unset or blank, so the backend's own
+ * default applies. Returned as the caller wrote it: the client maps it to the backend's id form.
+ */
+export function modelFromEnvironment(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env[MODEL_ENV]?.trim() || undefined;
+}
+
 /** Each backend's default model id as the caller writes it, before mapping: OpenRouter pins a version, TypeSafe follows latest. */
 const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
   typesafe: "jev-latest",

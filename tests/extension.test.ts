@@ -15,6 +15,9 @@ let tool: RegisteredTool;
 let command: RegisteredCommand;
 const savedKey = process.env.TYPESAFE_API_KEY;
 const savedEnabled = process.env.PI_TYPESAFE_ENABLED;
+const savedBackend = process.env.PI_TYPESAFE_BACKEND;
+const savedModel = process.env.PI_TYPESAFE_MODEL;
+const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalFetch = globalThis.fetch;
 const notices: string[] = [];
@@ -75,6 +78,9 @@ after(async () => {
   globalThis.fetch = originalFetch;
   if (savedKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedKey;
   if (savedEnabled === undefined) delete process.env.PI_TYPESAFE_ENABLED; else process.env.PI_TYPESAFE_ENABLED = savedEnabled;
+  if (savedBackend === undefined) delete process.env.PI_TYPESAFE_BACKEND; else process.env.PI_TYPESAFE_BACKEND = savedBackend;
+  if (savedModel === undefined) delete process.env.PI_TYPESAFE_MODEL; else process.env.PI_TYPESAFE_MODEL = savedModel;
+  if (savedOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouterKey;
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
   if (temporary) await rm(temporary, { recursive: true, force: true });
 });
@@ -273,4 +279,131 @@ test("the registered tool admits the same near-miss aliases as the library", asy
   ]);
   assert.equal(networkCalls, before + 1);
   assert.equal(result.details.answers.yes.noul, 0.9);
+});
+
+/** The extension resolves its backend once at load time, so a new PI_TYPESAFE_BACKEND needs a fresh module instance. */
+async function reloadExtension(): Promise<{ command: RegisteredCommand; tool: RegisteredTool }> {
+  const loader = new DefaultResourceLoader({
+    cwd: temporary,
+    agentDir: temporary,
+    settingsManager: SettingsManager.inMemory(),
+    noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    additionalExtensionPaths: [resolve("src/extension.ts")],
+  });
+  await loader.reload();
+  const result = loader.getExtensions();
+  assert.deepEqual(result.errors, [], "native Pi loader must accept the extension under a backend override");
+  const loaded = result.extensions[0];
+  assert.ok(loaded);
+  const scopedTool = loaded.tools.get("typesafe_evaluate");
+  const scopedCommand = loaded.commands.get("typesafe");
+  assert.ok(scopedTool);
+  assert.ok(scopedCommand);
+  return { command: scopedCommand, tool: scopedTool };
+}
+
+/** Run a call on a reloaded instance's own tool, which has its own resolved backend. */
+const runScopedTool = (scopedTool: RegisteredTool) => Reflect.apply(scopedTool.definition.execute, scopedTool.definition, [
+  "test-call", { state: "synthetic", questions: { yes: { type: "noul", instructions: "Is this synthetic?" } } }, undefined, undefined, ctx,
+]);
+
+/** Stub fetch, recording request URLs and bodies, and always restore the file's own counter-stub afterwards. */
+async function withFetch(
+  replacement: (input: unknown, init?: { body?: unknown }) => Promise<Response>,
+  body: (requests: string[], bodies: string[]) => Promise<void>,
+): Promise<void> {
+  const requests: string[] = [];
+  const bodies: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push(String(input));
+    bodies.push(String(init?.body ?? ""));
+    return replacement(input, init as { body?: unknown } | undefined);
+  };
+  try {
+    await body(requests, bodies);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("PI_TYPESAFE_BACKEND routes the tool to another host and names it in status", async () => {
+  process.env.PI_TYPESAFE_BACKEND = "openrouter";
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  process.env.OPENROUTER_API_KEY = "or_fake_key_0123456789abcdef";
+  try {
+    const scoped = await reloadExtension();
+    await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
+    const line = notices.at(-1) ?? "";
+    assert.ok(line.includes("OpenRouter backend: openrouter.ai"), line);
+    assert.ok(line.includes('model "typesafe/jev-1.13"'), line);
+    assert.ok(line.includes("key from OPENROUTER_API_KEY"), line);
+    assert.equal(line.includes("api.typesafe.ai and may incur charges"), false, "the consent line names the host actually used");
+    await withFetch(async () => Response.json({ model: "typesafe/jev-1.13", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 7, output_tokens: 0 } }), async requests => {
+      await runScopedTool(scoped.tool);
+      assert.ok(requests.some(url => url.includes("openrouter.ai")), requests.join("\n"));
+      assert.equal(requests.some(url => url.includes("api.typesafe.ai")), false, requests.join("\n"));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.PI_TYPESAFE_BACKEND;
+    delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test("PI_TYPESAFE_MODEL overrides the backend default and is mapped to the backend's id form", async () => {
+  process.env.PI_TYPESAFE_BACKEND = "openrouter";
+  process.env.PI_TYPESAFE_MODEL = "jev-1.14";
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  process.env.OPENROUTER_API_KEY = "or_fake_key_0123456789abcdef";
+  try {
+    const scoped = await reloadExtension();
+    await withFetch(async () => Response.json({ model: "typesafe/jev-1.14", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 7, output_tokens: 0 } }), async (_requests, bodies) => {
+      await runScopedTool(scoped.tool);
+      assert.ok(bodies.some(entry => entry.includes('"typesafe/jev-1.14"')), bodies.join("\n"));
+    });
+    await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
+    assert.ok((notices.at(-1) ?? "").includes("Model: jev-1.14"), notices.at(-1) ?? "");
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.PI_TYPESAFE_BACKEND;
+    delete process.env.PI_TYPESAFE_MODEL;
+    delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test("an invalid PI_TYPESAFE_BACKEND fails loudly instead of sending judgments", async () => {
+  process.env.PI_TYPESAFE_BACKEND = "open-router";
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  try {
+    const scoped = await reloadExtension();
+    await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
+    const line = notices.at(-1) ?? "";
+    assert.ok(line.includes("PI_TYPESAFE_BACKEND is invalid"), line);
+    assert.ok(line.includes('Unknown judgment backend "open-router"'), line);
+    await withFetch(async () => { throw new Error("an unusable backend name must never reach the API"); }, async requests => {
+      await assert.rejects(runScopedTool(scoped.tool), /Unknown judgment backend/);
+      assert.deepEqual(requests, [], "nothing is submitted with an unusable backend name");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.PI_TYPESAFE_BACKEND;
+  }
+});
+
+test("login and logout refuse on a backend that does not use the TypeSafe key store", async () => {
+  process.env.PI_TYPESAFE_BACKEND = "openrouter";
+  process.env.OPENROUTER_API_KEY = "or_fake_key_0123456789abcdef";
+  try {
+    const scoped = await reloadExtension();
+    for (const action of ["login", "logout"]) {
+      const before = confirmations;
+      await Reflect.apply(scoped.command.handler, scoped.command, [action, ctx]);
+      const line = notices.at(-1) ?? "";
+      assert.ok(line.includes("OPENROUTER_API_KEY"), `${action}: ${line}`);
+      assert.equal(confirmations, before, `${action} must not prompt for a key it cannot use`);
+    }
+  } finally {
+    delete process.env.PI_TYPESAFE_BACKEND;
+    delete process.env.OPENROUTER_API_KEY;
+  }
 });
