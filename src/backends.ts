@@ -187,14 +187,6 @@ export function backendPrice(backend: ResolvedBackend, model: string): number | 
   return prices !== undefined && Object.hasOwn(prices, model) ? prices[model] : undefined;
 }
 
-/**
- * Whether a backend's key comes from the TypeSafe resolution (`TYPESAFE_API_KEY`, then the login store) or only from
- * its own environment variable. Only the TypeSafe backend has a login store; every other backend is environment-only.
- */
-export function usesTypesafeKey(backend: BackendConfig): boolean {
-  return (backend.keyEnv ?? TYPESAFE_KEY_ENV) === TYPESAFE_KEY_ENV;
-}
-
 const KEY_ENV_MESSAGE = "Backend keyEnv must name an environment variable: letters, digits, and underscores, not starting with a digit.";
 const HOST_MESSAGE = "Backend host must be an absolute https: URL with no user info, path, query, or fragment (http: is allowed only for localhost, 127.0.0.0/8, and [::1]).";
 

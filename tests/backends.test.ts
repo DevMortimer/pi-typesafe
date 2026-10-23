@@ -267,7 +267,7 @@ test("an endpoint never reads TYPESAFE_API_KEY or the login store", () => {
   assert.throws(() => createTypeSafe({ backend: { label: "Gateway", host: "https://gw.example.com", keyEnv: "GATEWAY_JEV_KEY", defaultModel: "jev-latest" }, fetch }), (error: unknown) => {
     assert.ok(error instanceof TypeSafeIntegrationError);
     assert.equal(error.code, "configuration");
-    assert.equal(error.message, "No API key. Set GATEWAY_JEV_KEY in the environment.");
+    assert.equal(error.message, "No API key. Run /typesafe login in Pi, or set GATEWAY_JEV_KEY in the environment.");
     return true;
   });
   assert.equal(fetchCalls, 0);
@@ -283,7 +283,7 @@ test("commandcode with no COMMANDCODE_API_KEY is missing and unusable", () => {
   assert.throws(() => createTypeSafe({ backend: "commandcode", fetch }), (error: unknown) => {
     assert.ok(error instanceof TypeSafeIntegrationError);
     assert.equal(error.code, "configuration");
-    assert.equal(error.message, "No API key. Set COMMANDCODE_API_KEY in the environment.");
+    assert.equal(error.message, "No API key. Run /typesafe login commandcode in Pi, or set COMMANDCODE_API_KEY in the environment.");
     return true;
   });
   assert.equal(fetchCalls, 0);
@@ -459,4 +459,12 @@ test("sentModelId is the id a request carries, with and without a model override
   assert.equal(sentModelId("typesafe", "jev-1.14"), "jev-1.14");
   assert.equal(sentModelId("openrouter"), "typesafe/jev-1.13");
   assert.equal(sentModelId("openrouter", "jev-1.14"), "typesafe/jev-1.14");
+});
+
+test("every backend has a login store, so usesTypesafeKey is gone from the exported surface", async () => {
+  // A key can be stored for any backend now, so the question the removed export answered has one answer.
+  for (const module of [await import("../src/backends.js"), await import("../src/index.js")]) {
+    assert.equal("usesTypesafeKey" in module, false);
+    assert.equal("hasLoginStore" in module, false);
+  }
 });

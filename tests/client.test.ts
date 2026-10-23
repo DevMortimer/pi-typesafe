@@ -463,7 +463,7 @@ test("a TypeSafe key is never sent to another backend", () => {
       assert.ok(error instanceof TypeSafeIntegrationError);
       assert.equal(error.code, "configuration");
       assert.match(error.message, /OPENROUTER_API_KEY/);
-      assert.doesNotMatch(error.message, /typesafe login/);
+      assert.match(error.message, /\/typesafe login openrouter/);
       return true;
     });
   } finally {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -196,7 +196,7 @@ test("login verifies, stores with owner-only permissions, and never echoes the k
   customResult = "ts_live_key_0123456789abcdef";
   await runCommand("login");
   assert.equal(modelListCalls, 1);
-  assert.ok(notices.at(-1)?.includes("Key verified (1 model available)"));
+  assert.ok(notices.at(-1)?.includes("TypeSafe key verified (1 model available)"));
   assert.equal(notices.some(text => text.includes("ts_live_key")), false);
   assert.equal(statSync(storedPath).mode & 0o777, 0o600);
   await runCommand("status");
@@ -462,21 +462,75 @@ test("an inherited property name is refused, and the extension still loads its t
   }
 });
 
-test("login and logout refuse on a backend that does not use the TypeSafe key store", async () => {
+test("on a named backend the environment variable wins over the store, and logout still removes the stored key", async () => {
   process.env.PI_TYPESAFE_BACKEND = "openrouter";
   process.env.OPENROUTER_API_KEY = "or_fake_key_0123456789abcdef";
+  storeApiKey("sk-or-0123456789abcdef", "openrouter");
   try {
     const scoped = await reloadExtension();
-    for (const action of ["login", "logout"]) {
-      const before = confirmations;
-      await Reflect.apply(scoped.command.handler, scoped.command, [action, ctx]);
-      const line = notices.at(-1) ?? "";
-      assert.ok(line.includes("OPENROUTER_API_KEY"), `${action}: ${line}`);
-      assert.equal(confirmations, before, `${action} must not prompt for a key it cannot use`);
-    }
+    const run = (args: string) => Reflect.apply(scoped.command.handler, scoped.command, [args, ctx]);
+    // The stub throws, so reaching the network here would fail the test instead of only changing a count.
+    await withFetch(async () => { throw new Error("no request may be made while the variable wins"); }, async () => {
+      await run("login openrouter");
+      assert.ok(notices.at(-1)?.includes("OPENROUTER_API_KEY is set in the environment and takes precedence"), `login: ${notices.at(-1)}`);
+      await run("status");
+      assert.ok(notices.at(-1)?.includes("OPENROUTER_API_KEY"), `status names the winning source: ${notices.at(-1)}`);
+      await run("logout");
+      assert.ok(notices.at(-1)?.includes("OPENROUTER_API_KEY is still set in the environment"), `logout: ${notices.at(-1)}`);
+    });
+    assert.equal(existsSync(join(temporary, "pi-typesafe", "auth.json")), false, "logout removes the stored key the variable shadows");
   } finally {
     delete process.env.PI_TYPESAFE_BACKEND;
     delete process.env.OPENROUTER_API_KEY;
+    clearStoredApiKey();
+  }
+});
+
+test("login and logout act on the session's own backend and leave another backend's key in place", async () => {
+  const savedEnvKey = process.env.TYPESAFE_API_KEY;
+  delete process.env.TYPESAFE_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  process.env.PI_TYPESAFE_BACKEND = "openrouter";
+  const storedPath = join(temporary, "pi-typesafe", "auth.json");
+  const storedKeys = () => (existsSync(storedPath) ? Object.keys(JSON.parse(readFileSync(storedPath, "utf8")).keys).sort() : []);
+  try {
+    const scoped = await reloadExtension();
+    const run = (args: string) => Reflect.apply(scoped.command.handler, scoped.command, [args, ctx]);
+    await withFetch(
+      async input => String(input).endsWith("/v1/models")
+        ? Response.json({ models: [{ name: "jev-latest", description: "", release_date: "2026-01-01" }], data: [{ id: "typesafe/jev-latest" }] })
+        : Response.json({ model: "jev-test", answers: { key: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 12, output_tokens: 0 } }),
+      async (requests, bodies) => {
+        customResult = "ts_live_key_0123456789abcdef";
+        await run("login typesafe");
+        assert.deepEqual(storedKeys(), ["typesafe"]);
+        assert.ok(requests.at(-1)?.endsWith("/v1/models"), `TypeSafe is proved with its model list: ${requests.at(-1)}`);
+
+        // No backend named: the session's own backend, proved with one judge request on its own host.
+        customResult = "sk-or-0123456789abcdef";
+        const before = requests.length;
+        await run("login");
+        const sent = requests.slice(before);
+        assert.equal(sent.length, 1, `a public model list cannot prove a key, so one request does: ${sent.join(", ")}`);
+        assert.ok(sent[0]?.startsWith("https://openrouter.ai/"), `the request goes to OpenRouter: ${sent[0]}`);
+        assert.ok(bodies.at(-1)?.includes('"typesafe/jev'), `the request names the mapped model: ${bodies.at(-1)}`);
+        assert.ok(notices.at(-1)?.includes("OpenRouter key verified with one request"), `login: ${notices.at(-1)}`);
+        assert.deepEqual(storedKeys(), ["openrouter", "typesafe"]);
+
+        await run("logout");
+        assert.deepEqual(storedKeys(), ["typesafe"], "logging out one backend leaves the other's key");
+        customResult = "sk-or-fedcba9876543210";
+        await run("login");
+        assert.deepEqual(storedKeys(), ["openrouter", "typesafe"], "login works again after a logout");
+        await run("status");
+        assert.ok(notices.at(-1)?.includes("/typesafe login"), `status reads the stored OpenRouter key: ${notices.at(-1)}`);
+      },
+    );
+  } finally {
+    if (savedEnvKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedEnvKey;
+    delete process.env.PI_TYPESAFE_BACKEND;
+    delete process.env.OPENROUTER_API_KEY;
+    clearStoredApiKey();
   }
 });
 

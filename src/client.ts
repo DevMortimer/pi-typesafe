@@ -1,7 +1,7 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
-import { TYPESAFE_KEY_ENV, backendPrice, resolveBackend, sentModelId, usesTypesafeKey } from "./backends.js";
+import { backendPrice, resolveBackend, sentModelId } from "./backends.js";
 import type { BackendConfig, BackendSpec, RegistryBackendConfig, ResolvedBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
@@ -205,7 +205,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     if (situation.kind === "environment" || situation.kind === "stored") apiKey = situation.key;
   }
   if (!apiKey) {
-    const how = usesTypesafeKey(backend) ? `Run /typesafe login in Pi, or set ${TYPESAFE_KEY_ENV}` : `Set ${backend.keyEnv}`;
+    const how = `Run /typesafe login${backend.name ? ` ${backend.name}` : ""} in Pi, or set ${backend.keyEnv}`;
     throw new TypeSafeIntegrationError("configuration", `No API key. ${how} in the environment.`);
   }
   const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");

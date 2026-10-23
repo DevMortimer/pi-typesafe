@@ -15,10 +15,10 @@ class KeyPrompt extends Container implements Focusable {
   private readonly input = new SecretInput();
   private isFocused = false;
 
-  constructor(theme: { fg(color: string, text: string): string; bold(text: string): string }, done: (value: string | undefined) => void) {
+  constructor(theme: { fg(color: string, text: string): string; bold(text: string): string }, label: string, done: (value: string | undefined) => void) {
     super();
-    this.addChild(new Text(theme.fg("accent", theme.bold("TypeSafe API key")), 1, 0));
-    this.addChild(new Text(theme.fg("muted", "Paste the key from console.typesafe.ai › API Keys. Input is hidden. Enter saves, Esc cancels."), 1, 0));
+    this.addChild(new Text(theme.fg("accent", theme.bold(`${label} API key`)), 1, 0));
+    this.addChild(new Text(theme.fg("muted", "Paste the key. Input is hidden. Enter saves, Esc cancels."), 1, 0));
     this.addChild(this.input);
     this.input.onSubmit = value => done(value);
     this.input.onEscape = () => done(undefined);
@@ -43,9 +43,9 @@ class KeyPrompt extends Container implements Focusable {
 }
 
 /** Hidden input in the TUI; falls back to Pi's plain input dialog where custom components are unavailable. */
-export async function promptForApiKey(ctx: ExtensionCommandContext): Promise<string | undefined> {
+export async function promptForApiKey(ctx: ExtensionCommandContext, label = "TypeSafe"): Promise<string | undefined> {
   if (typeof ctx.ui.custom === "function") {
-    return ctx.ui.custom<string | undefined>((_tui, theme, _keybindings, done) => new KeyPrompt(theme, done));
+    return ctx.ui.custom<string | undefined>((_tui, theme, _keybindings, done) => new KeyPrompt(theme, label, done));
   }
-  return ctx.ui.input("TypeSafe API key (visible while typing)", "Paste the key, then press Enter");
+  return ctx.ui.input(`${label} API key (visible while typing)`, "Paste the key, then press Enter");
 }

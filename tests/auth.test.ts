@@ -43,8 +43,8 @@ test("another backend reports its own key and never the TypeSafe login hint", ()
     const report = describeAuth(missing);
     assert.equal(report.level, "error");
     assert.ok(report.text.startsWith("OpenRouter key: missing"));
-    assert.ok(report.text.includes("OPENROUTER_API_KEY is set"));
-    assert.ok(!report.text.includes("/typesafe login"));
+    assert.ok(report.text.includes("OPENROUTER_API_KEY"));
+    assert.ok(report.text.includes("/typesafe login openrouter"));
 
     process.env.OPENROUTER_API_KEY = "sk-or-0123456789abcdef";
     const present = authState({ backend: "openrouter" });

@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, resolveBackend, usesTypesafeKey } from "./backends.js";
+import { DEFAULT_BACKEND, TYPESAFE_KEY_ENV, resolveBackend } from "./backends.js";
 import type { BackendSpec } from "./backends.js";
 import { credentialsPath, keySituation, keySourceLabel, piTypesafeDir } from "./credentials.js";
 import type { KeySource } from "./credentials.js";
@@ -40,8 +40,9 @@ export interface AuthState {
   /** Short human label for the key source: `TYPESAFE_API_KEY`, `OPENROUTER_API_KEY`, `/typesafe login`, `no key`, `unusable key`. */
   readonly keyName: string;
   /**
-   * True when the key in effect was accepted by the backend (login verifies a TypeSafe key; a successful request proves
-   * any key). The record is shared across backends: switching backends keeps the last outcome until the next request.
+   * True when the key in effect was accepted by the backend (a login proves the backend it was asked for; a successful
+   * request proves any key). The record is shared across backends: switching backends keeps the last outcome until the
+   * next request.
    */
   readonly verified: boolean;
   readonly verifiedAt?: string;
@@ -154,7 +155,7 @@ export function describeAuth(state: AuthState = authState()): AuthReport {
   const label = `${config.label} key`;
   const since = state.lastFailure ? ` Last failure: ${state.lastFailure.message}${state.lastFailure.at ? ` (${state.lastFailure.at})` : ""}` : "";
   if (state.kind === "missing") {
-    const how = usesTypesafeKey(config) ? `a key is configured (/typesafe login or ${TYPESAFE_KEY_ENV})` : `${config.keyEnv} is set in the environment`;
+    const how = `a key is configured (/typesafe login${config.name && config.name !== DEFAULT_BACKEND ? ` ${config.name}` : ""} or ${config.keyEnv})`;
     return { level: "error", text: `${label}: missing — every Jev judgment is skipped until ${how}.${since}` };
   }
   if (state.kind === "unusable") {

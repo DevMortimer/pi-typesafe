@@ -14,6 +14,7 @@ const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalFetch = globalThis.fetch;
 let customResult: string | undefined;
 let modelListCalls = 0;
+let decisionCalls = 0;
 const storedPath = () => join(temporary, "pi-typesafe", "auth.json");
 const ctx = (hasUI = true) => ({ hasUI, ui: { custom: async () => customResult, input: async () => { throw new Error("plain input must not be used"); } } }) as unknown as ExtensionCommandContext;
 
@@ -25,12 +26,17 @@ before(async () => {
       modelListCalls++;
       return Response.json({ models: [{ name: "jev-latest", description: "", release_date: "2026-01-01" }, { name: "jev-preview", description: "", release_date: "2026-01-01" }] });
     }
+    if (String(input).includes("openrouter.ai/api/alpha/decisions")) {
+      decisionCalls++;
+      return Response.json({ model: "typesafe/jev-1.13", answers: { key: { type: "noul", noul: 0.99 } }, usage: { input_tokens: 10, output_tokens: 0 } });
+    }
     throw new Error("unexpected request");
   };
 });
 beforeEach(async () => {
   delete process.env.TYPESAFE_API_KEY;
   modelListCalls = 0;
+  decisionCalls = 0;
   customResult = undefined;
   await rm(storedPath(), { force: true });
 });
@@ -82,15 +88,20 @@ test("ensureApiKey reports an existing key without prompting, otherwise logs in"
   assert.equal(modelListCalls, 1);
 });
 
-test("ensureApiKey for another backend uses its environment variable and never opens the TypeSafe login", async () => {
+test("another backend keeps its own key: its environment variable wins, otherwise its own login stores it", async () => {
   const savedOpenRouter = process.env.OPENROUTER_API_KEY;
   try {
     delete process.env.OPENROUTER_API_KEY;
-    // A stored TypeSafe key does not satisfy OpenRouter, and the prompt must not run: it would verify against api.typesafe.ai.
+    // A stored TypeSafe key does not satisfy OpenRouter: the store is keyed by backend.
     customResult = "ts_live_key_0123456789abcdef";
     assert.deepEqual(await ensureApiKey(ctx()), { source: "stored", login: { path: storedPath(), models: 2 } });
-    await assert.rejects(ensureApiKey(ctx(), { backend: "openrouter" }), (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "configuration" && /OPENROUTER_API_KEY/.test(error.message));
-    assert.equal(modelListCalls, 1, "no second verification");
+
+    // OpenRouter's model list is public, so the login proves the key with one request and stores it under its own name.
+    customResult = "sk-or-0123456789abcdef";
+    const login = await ensureApiKey(ctx(), { backend: "openrouter" });
+    assert.equal(login?.source, "stored");
+    assert.equal(decisionCalls, 1, "one request proves the key");
+    assert.equal(modelListCalls, 1, "no model-list call for a public list");
 
     process.env.OPENROUTER_API_KEY = "sk-or-0123456789abcdef";
     assert.deepEqual(await ensureApiKey(ctx(), { backend: "openrouter" }), { source: "environment" });
