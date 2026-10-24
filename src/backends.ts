@@ -109,9 +109,36 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
 export function backendConfig(name: TypeSafeBackend): RegistryBackendConfig {
-  const backend = DECISIONS_BACKENDS[name];
+  // A bare lookup finds `toString` on Object.prototype, so only an own entry is a backend.
+  const backend = Object.hasOwn(DECISIONS_BACKENDS, name) ? DECISIONS_BACKENDS[name] : undefined;
   if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${name}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
   return backend;
+}
+
+/** The environment variable naming the judgment backend a Pi session uses; unset means `typesafe`. */
+export const BACKEND_ENV = "PI_TYPESAFE_BACKEND";
+
+/** The environment variable overriding the backend's default model; unset sends the backend's own default. */
+export const MODEL_ENV = "PI_TYPESAFE_MODEL";
+
+/**
+ * The backend a Pi session uses, from `PI_TYPESAFE_BACKEND`. An unset or blank variable means the default backend; a
+ * name the registry does not know is a `configuration` error naming the valid names, so a typo fails loudly at
+ * session start instead of silently sending judgments to a host the operator did not choose.
+ */
+export function backendFromEnvironment(env: NodeJS.ProcessEnv = process.env): TypeSafeBackend {
+  const name = env[BACKEND_ENV]?.trim();
+  if (!name) return DEFAULT_BACKEND;
+  backendConfig(name as TypeSafeBackend);
+  return name as TypeSafeBackend;
+}
+
+/**
+ * The model the Pi session sends, from `PI_TYPESAFE_MODEL`; `undefined` when unset or blank, so the backend's own
+ * default applies. Returned as the caller wrote it: the client maps it to the backend's id form.
+ */
+export function modelFromEnvironment(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env[MODEL_ENV]?.trim() || undefined;
 }
 
 /** Each backend's default model id as the caller writes it, before mapping: OpenRouter pins a version, TypeSafe follows latest. */
@@ -141,6 +168,14 @@ export function backendModelId(backend: TypeSafeBackend, model: string): string 
 /** The model a client sends when the caller names none: the backend's own default, in the form that backend accepts. */
 export function defaultModelId(backend: TypeSafeBackend): string {
   return backendModelId(backend, DEFAULT_MODEL[backend]);
+}
+
+/**
+ * The model id a request carries on this backend: the caller's id mapped to the backend's id form, or the backend's
+ * own default when the caller names none. The client sends this value and callers print it, so the two cannot disagree.
+ */
+export function sentModelId(backend: TypeSafeBackend, model?: string): string {
+  return model === undefined ? defaultModelId(backend) : backendModelId(backend, model);
 }
 
 /**

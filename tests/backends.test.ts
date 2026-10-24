@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import {
   authState, backendHost, clearAuthState, clearStoredApiKey, createTypeSafe, keySituation,
-  noul, resolveBackend, score, storeApiKey, TypeSafeIntegrationError,
+  noul, resolveBackend, score, sentModelId, storeApiKey, TypeSafeIntegrationError,
+  BACKEND_ENV, MODEL_ENV, backendFromEnvironment, modelFromEnvironment,
 } from "../src/index.js";
 import type { BackendEndpoint, BackendSpec, Questions } from "../src/index.js";
 import { safeError } from "../src/errors.js";
@@ -406,6 +407,44 @@ test("resolveBackend resolves registry names to the registry entries", () => {
   assert.deepEqual(resolveBackend("openrouter").defaultModel, "typesafe/jev-1.13");
 });
 
+test("backendFromEnvironment reads PI_TYPESAFE_BACKEND and default only when unset", () => {
+  assert.equal(backendFromEnvironment({}), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "" }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "   " }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "typesafe" }), "typesafe");
+  assert.equal(backendFromEnvironment({ [BACKEND_ENV]: " openrouter " }), "openrouter");
+  for (const name of ["openrouter", "commandcode", "liquid", "subq"] as const) {
+    assert.equal(backendFromEnvironment({ [BACKEND_ENV]: name }), name);
+  }
+  // A typo must fail loudly at startup rather than send judgments somewhere unintended.
+  assert.throws(
+    () => backendFromEnvironment({ [BACKEND_ENV]: "open-router" }),
+    (error: unknown) => error instanceof TypeSafeIntegrationError
+      && error.code === "configuration"
+      && /Unknown judgment backend "open-router"/.test(error.message),
+  );
+});
+
+test("an inherited property name is not a backend", () => {
+  // A bare registry lookup finds these on Object.prototype and registers a backend that breaks the extension.
+  for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+    assert.throws(
+      () => backendFromEnvironment({ [BACKEND_ENV]: name }),
+      (error: unknown) => error instanceof TypeSafeIntegrationError
+        && error.code === "configuration"
+        && error.message.includes(`Unknown judgment backend "${name}"`),
+      name,
+    );
+  }
+});
+
+test("modelFromEnvironment reads PI_TYPESAFE_MODEL and leaves the backend default alone when unset", () => {
+  assert.equal(modelFromEnvironment({}), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: "" }), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: "  " }), undefined);
+  assert.equal(modelFromEnvironment({ [MODEL_ENV]: " jev-1.14 " }), "jev-1.14");
+});
+
 test("backendHost reports the destination host", () => {
   assert.equal(backendHost("commandcode"), "api.commandcode.ai");
   assert.equal(backendHost("typesafe"), "api.typesafe.ai");
@@ -413,4 +452,11 @@ test("backendHost reports the destination host", () => {
   assert.equal(backendHost(gateway), "gw.example.com");
   assert.equal(backendHost({ label: "Gateway", host: "https://gw.example.com:8443", keyEnv: "GATEWAY_JEV_KEY" }), "gw.example.com:8443");
   assert.equal(backendHost({ label: "Local", host: "http://127.0.0.1:8787", keyEnv: "GATEWAY_JEV_KEY" }), "127.0.0.1:8787");
+});
+
+test("sentModelId is the id a request carries, with and without a model override", () => {
+  assert.equal(sentModelId("typesafe"), "jev-latest");
+  assert.equal(sentModelId("typesafe", "jev-1.14"), "jev-1.14");
+  assert.equal(sentModelId("openrouter"), "typesafe/jev-1.13");
+  assert.equal(sentModelId("openrouter", "jev-1.14"), "typesafe/jev-1.14");
 });
