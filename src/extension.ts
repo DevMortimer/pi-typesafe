@@ -161,6 +161,12 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         if (ctx.hasUI) ctx.ui.notify(text, level);
         else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
       };
+      // No key change makes an unusable backend name work: decline instead of prompting for a key or deleting the
+      // stored one a later valid run would want.
+      if (backendError !== undefined && (action === "login" || action === "logout")) {
+        report(`${backendError} No key change fixes that, so /typesafe ${action} does nothing: fix or unset ${BACKEND_ENV} first.`, "warning");
+        return;
+      }
       try {
         if (action === "status") {
           const spend = client?.getSpend();

@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Extension, RegisteredCommand, RegisteredTool } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { parseEvaluationRequest } from "../src/index.js";
+import { clearStoredApiKey, parseEvaluationRequest, storeApiKey } from "../src/index.js";
 
 let temporary: string;
 let extension: Extension;
@@ -477,5 +477,33 @@ test("login and logout refuse on a backend that does not use the TypeSafe key st
   } finally {
     delete process.env.PI_TYPESAFE_BACKEND;
     delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test("an invalid backend name declines login and logout without touching the stored key", async () => {
+  const savedEnvKey = process.env.TYPESAFE_API_KEY;
+  delete process.env.TYPESAFE_API_KEY;
+  const storedPath = join(temporary, "pi-typesafe", "auth.json");
+  storeApiKey("ts_live_key_0123456789abcdef");
+  process.env.PI_TYPESAFE_BACKEND = "toString";
+  try {
+    const scoped = await reloadExtension();
+    // The login prompt is the only path to ctx.ui.custom, so counting its calls proves login did not ask.
+    let prompts = 0;
+    const prompt = ui.custom;
+    ui.custom = async () => { prompts++; return undefined; };
+    const before = confirmations;
+    await Reflect.apply(scoped.command.handler, scoped.command, ["login", ctx]);
+    ui.custom = prompt;
+    assert.ok((notices.at(-1) ?? "").includes("Unknown judgment backend"), notices.at(-1) ?? "");
+    assert.equal(prompts, 0, "login must not prompt for a key no backend can use");
+    assert.equal(confirmations, before);
+    await Reflect.apply(scoped.command.handler, scoped.command, ["logout", ctx]);
+    assert.ok((notices.at(-1) ?? "").includes("Unknown judgment backend"), notices.at(-1) ?? "");
+    assert.ok(existsSync(storedPath), "logout must not delete the stored key when no backend can use it");
+  } finally {
+    delete process.env.PI_TYPESAFE_BACKEND;
+    if (savedEnvKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedEnvKey;
+    clearStoredApiKey();
   }
 });
