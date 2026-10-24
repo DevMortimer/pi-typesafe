@@ -21,6 +21,7 @@ const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalFetch = globalThis.fetch;
 const notices: string[] = [];
+const confirmTexts: string[] = [];
 let confirmResult = true;
 let confirmations = 0;
 let editorText: string | undefined;
@@ -29,7 +30,7 @@ let modelListCalls = 0;
 let customResult: string | undefined;
 const ui = {
   notify: (text: string) => { notices.push(text); },
-  confirm: async () => { confirmations++; return confirmResult; },
+  confirm: async (title: string, text?: string) => { confirmations++; confirmTexts.push(text === undefined ? title : `${title} ${text}`); return confirmResult; },
   editor: async () => editorText,
   custom: async () => customResult,
   input: async () => { throw new Error("plain input must not be used when custom UI exists"); },
@@ -350,7 +351,7 @@ test("PI_TYPESAFE_BACKEND routes the tool to another host and names it in status
   }
 });
 
-test("PI_TYPESAFE_MODEL overrides the backend default and is mapped to the backend's id form", async () => {
+test("the consent dialog, the status line, and the request body name the same model", async () => {
   process.env.PI_TYPESAFE_BACKEND = "openrouter";
   process.env.PI_TYPESAFE_MODEL = "jev-1.14";
   process.env.PI_TYPESAFE_ENABLED = "1";
@@ -359,15 +360,70 @@ test("PI_TYPESAFE_MODEL overrides the backend default and is mapped to the backe
     const scoped = await reloadExtension();
     await withFetch(async () => Response.json({ model: "typesafe/jev-1.14", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 7, output_tokens: 0 } }), async (_requests, bodies) => {
       await runScopedTool(scoped.tool);
-      assert.ok(bodies.some(entry => entry.includes('"typesafe/jev-1.14"')), bodies.join("\n"));
+      const sent = JSON.parse(bodies.at(-1) ?? "{}").model;
+      assert.equal(sent, "typesafe/jev-1.14");
+      const before = confirmations;
+      await Reflect.apply(scoped.command.handler, scoped.command, ["enable", ctx]);
+      assert.equal(confirmations, before + 1);
+      const dialog = confirmTexts.at(-1) ?? "";
+      assert.ok(dialog.includes(`as model ${JSON.stringify(sent)}`), dialog);
+      await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
+      const line = notices.at(-1) ?? "";
+      assert.ok(line.includes(JSON.stringify(sent)), line);
+      assert.equal(line.split(sent).length - 1, 1, `status names the sent model once: ${line}`);
+      assert.equal(line.includes("  "), false, line);
     });
-    await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
-    assert.ok((notices.at(-1) ?? "").includes("Model: jev-1.14"), notices.at(-1) ?? "");
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.PI_TYPESAFE_BACKEND;
     delete process.env.PI_TYPESAFE_MODEL;
     delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+/** main's consent sentence: the override must leave it byte-identical, and a model override must be named in it. */
+const fixedConsent = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
+
+test("a model override is named in the consent dialog, and the unset dialog is unchanged", async () => {
+  const unset = await reloadExtension();
+  await Reflect.apply(unset.command.handler, unset.command, ["enable", ctx]);
+  assert.equal(confirmTexts.at(-1), `Enable TypeSafe for this session? ${fixedConsent}`);
+  process.env.PI_TYPESAFE_MODEL = "jev-1.14";
+  try {
+    const scoped = await reloadExtension();
+    await withFetch(async () => Response.json({ model: "jev-1.14", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 7, output_tokens: 0 } }), async (_requests, bodies) => {
+      await runScopedTool(scoped.tool);
+      const sent = JSON.parse(bodies.at(-1) ?? "{}").model;
+      assert.equal(sent, "jev-1.14");
+      await Reflect.apply(scoped.command.handler, scoped.command, ["enable", ctx]);
+      const dialog = confirmTexts.at(-1) ?? "";
+      assert.ok(dialog.includes("api.typesafe.ai"), dialog);
+      assert.ok(dialog.includes(`as model ${JSON.stringify(sent)}`), dialog);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.PI_TYPESAFE_MODEL;
+  }
+});
+
+test("status names the model once, with single spaces, and claims none for an invalid backend name", async () => {
+  const unset = await reloadExtension();
+  await Reflect.apply(unset.command.handler, unset.command, ["status", ctx]);
+  const line = notices.at(-1) ?? "";
+  assert.ok(line.includes("Model: jev-latest."), line);
+  assert.equal(line.split("jev-latest").length - 1, 1, line);
+  assert.equal(line.includes("  "), false, line);
+  process.env.PI_TYPESAFE_BACKEND = "open-router";
+  try {
+    const bad = await reloadExtension();
+    await Reflect.apply(bad.command.handler, bad.command, ["status", ctx]);
+    const badLine = notices.at(-1) ?? "";
+    assert.ok(badLine.includes("PI_TYPESAFE_BACKEND is invalid"), badLine);
+    assert.equal(badLine.includes("Model:"), false, badLine);
+    assert.equal(badLine.split("jev-latest").length - 1, 0, badLine);
+    assert.equal(badLine.includes("  "), false, badLine);
+  } finally {
+    delete process.env.PI_TYPESAFE_BACKEND;
   }
 });
 

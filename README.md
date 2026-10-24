@@ -114,7 +114,7 @@ Whatever TypeSafe bills for the input tokens of your state and questions; output
 The main model can answer any of these questions in prose. It is slower, costs more per call, and grades its own work. Jev returns a calibrated number your code or the agent can branch on, in a quarter of a second, from a separate model. That matters most when the same question is asked many times: every tool call, every file, every issue in a list.
 
 **What is sent?**
-Only the state and questions you (or the agent, once enabled) submit, to `https://api.typesafe.ai` only. No files, conversation history, or telemetry. Error messages never include upstream response bodies, headers, keys, or your submitted state.
+Only the state and questions you (or the agent, once enabled) submit, to the backend that serves the session: `https://api.typesafe.ai` by default, otherwise the host `PI_TYPESAFE_BACKEND` names, which `/typesafe status` reports. No files, conversation history, or telemetry. Error messages never include upstream response bodies, headers, keys, or your submitted state.
 
 **Limits?**
 Per request: 32 questions (16 on SubQ) and 64 KiB of JSON. Per session: 20 attempts, 15-second timeout, no automatic retries. Per day: no cap unless you set one. Session limits reset when a session starts or reloads; daily counters live in `~/.pi/agent/pi-typesafe/usage.json` and roll over at local midnight. The SDK's `TYPESAFE_BASE_URL` and `TYPESAFE_LOG_LEVEL` overrides are ignored.

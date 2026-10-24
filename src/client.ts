@@ -1,7 +1,7 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
-import { TYPESAFE_KEY_ENV, backendModelId, backendPrice, resolveBackend, usesTypesafeKey } from "./backends.js";
+import { TYPESAFE_KEY_ENV, backendPrice, resolveBackend, sentModelId, usesTypesafeKey } from "./backends.js";
 import type { BackendConfig, BackendSpec, RegistryBackendConfig, ResolvedBackend } from "./backends.js";
 import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
@@ -12,7 +12,7 @@ import type { BackendLimits } from "./schema.js";
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
 
-export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
+export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, sentModelId, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */
@@ -194,8 +194,9 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const backend: ResolvedBackend = resolveBackend(options.backend);
   let apiKey = options.apiKey?.trim();
   const baseURL = backend.host;
-  // Only a registry backend maps ids; a caller-supplied endpoint's model is sent as the caller wrote it.
-  const mapModel = (model: string): string => (backend.name === undefined ? model : backendModelId(backend.name, model));
+  // Only a registry backend maps ids; a caller-supplied endpoint's model is sent as the caller wrote it. This is the
+  // same derivation the extension prints, so the consent text and the request body cannot name different models.
+  const mapModel = (model: string): string => (backend.name === undefined ? model : sentModelId(backend.name, model));
 
   if (!apiKey) {
     // The same resolution that authState() and ensureApiKey() report, so the status line and the request agree.

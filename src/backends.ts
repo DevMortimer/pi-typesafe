@@ -171,6 +171,14 @@ export function defaultModelId(backend: TypeSafeBackend): string {
 }
 
 /**
+ * The model id a request carries on this backend: the caller's id mapped to the backend's id form, or the backend's
+ * own default when the caller names none. The client sends this value and callers print it, so the two cannot disagree.
+ */
+export function sentModelId(backend: TypeSafeBackend, model?: string): string {
+  return model === undefined ? defaultModelId(backend) : backendModelId(backend, model);
+}
+
+/**
  * The registry's price for a model, in USD per million input tokens, or undefined when the backend names none.
  * `model` is the id as sent. A caller-supplied endpoint has no prices.
  */

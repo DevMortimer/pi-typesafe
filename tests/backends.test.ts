@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import {
   authState, backendHost, clearAuthState, clearStoredApiKey, createTypeSafe, keySituation,
-  noul, resolveBackend, score, storeApiKey, TypeSafeIntegrationError,
+  noul, resolveBackend, score, sentModelId, storeApiKey, TypeSafeIntegrationError,
   BACKEND_ENV, MODEL_ENV, backendFromEnvironment, modelFromEnvironment,
 } from "../src/index.js";
 import type { BackendEndpoint, BackendSpec, Questions } from "../src/index.js";
@@ -452,4 +452,11 @@ test("backendHost reports the destination host", () => {
   assert.equal(backendHost(gateway), "gw.example.com");
   assert.equal(backendHost({ label: "Gateway", host: "https://gw.example.com:8443", keyEnv: "GATEWAY_JEV_KEY" }), "gw.example.com:8443");
   assert.equal(backendHost({ label: "Local", host: "http://127.0.0.1:8787", keyEnv: "GATEWAY_JEV_KEY" }), "127.0.0.1:8787");
+});
+
+test("sentModelId is the id a request carries, with and without a model override", () => {
+  assert.equal(sentModelId("typesafe"), "jev-latest");
+  assert.equal(sentModelId("typesafe", "jev-1.14"), "jev-1.14");
+  assert.equal(sentModelId("openrouter"), "typesafe/jev-1.13");
+  assert.equal(sentModelId("openrouter", "jev-1.14"), "typesafe/jev-1.14");
 });

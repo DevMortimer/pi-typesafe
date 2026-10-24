@@ -2,7 +2,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-
 import type { Static } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
-import { BACKEND_ENV, DEFAULT_BACKEND, MODEL_ENV, backendFromEnvironment, backendHost, defaultModelId, modelFromEnvironment, resolveBackend } from "./backends.js";
+import { BACKEND_ENV, DEFAULT_BACKEND, MODEL_ENV, backendFromEnvironment, backendHost, modelFromEnvironment, resolveBackend, sentModelId } from "./backends.js";
 import type { TypeSafeBackend } from "./backends.js";
 import { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
@@ -12,25 +12,28 @@ import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { loginWithPrompt } from "./login.js";
 import { DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, prepareEvaluationRequest } from "./schema.js";
 
-const disclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
+const fixedDisclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
 
 /**
- * The consent line for the backend this session actually uses. The fixed `disclosure` names api.typesafe.ai, which is
- * the wrong host to name once `PI_TYPESAFE_BACKEND` routes judgments elsewhere, and the TypeSafe key resolution is
- * replaced there too, so both host and key source are stated.
+ * The consent sentence for the backend this session actually uses, and whether it names the model sent. The default
+ * backend with no model override returns the fixed sentence unchanged, so an install that selects nothing reads
+ * exactly what it read before. Every other session is told the host, the backend, and the model id the request
+ * carries — the same `sentModelId` value the client sends, so consent cannot describe a model that is not sent.
  */
-function disclosureFor(backend: TypeSafeBackend, model: string | undefined): string {
-  if (backend === DEFAULT_BACKEND) return disclosure;
+function consentFor(backend: TypeSafeBackend, model: string | undefined): { text: string; namesModel: boolean } {
+  const namesModel = backend !== DEFAULT_BACKEND || model !== undefined;
+  if (!namesModel) return { text: fixedDisclosure, namesModel };
   const config = resolveBackend(backend);
-  const sent = model ?? defaultModelId(backend);
-  return `Submitted state and questions will be sent to ${backendHost(backend)} (${config.label}) as model ${JSON.stringify(sent)} and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.`;
+  return {
+    text: `Submitted state and questions will be sent to ${backendHost(backend)} (${config.label}) as model ${JSON.stringify(sentModelId(backend, model))} and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.`,
+    namesModel,
+  };
 }
 
-/** The status and consent line naming the host, model, and key variable, for a backend that is not the default one. */
-function backendLine(backend: TypeSafeBackend, model: string | undefined): string {
+/** The status line naming the backend, its host, and its key variable; the model is stated once, by `Model:` or the consent sentence. */
+function backendLine(backend: TypeSafeBackend): string {
   const config = resolveBackend(backend);
-  const sent = model ?? defaultModelId(backend);
-  return `${config.label} backend: ${backendHost(backend)}, model ${JSON.stringify(sent)}, key from ${config.keyEnv}.`;
+  return `${config.label} backend: ${backendHost(backend)}, key from ${config.keyEnv}.`;
 }
 const sample = {
   state: { message: "I was charged twice for my subscription. Please help today." },
@@ -70,7 +73,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     backendError = safeError(error).message;
   }
   const typesafeKey = backend === DEFAULT_BACKEND;
-  const disclosure = disclosureFor(backend, model);
+  const consent = consentFor(backend, model);
   let client: TypeSafe | undefined;
   // One callout per distinct degradation per session: a long run must not bury the reason in repeated notices.
   let calledOut: string | undefined;
@@ -103,7 +106,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "typesafe_evaluate",
     label: "TypeSafe",
-    description: `Evaluate supplied state with independent Choice, Score, and Noul questions in one ${resolveBackend(backend).label} request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${disclosure} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${DEFAULT_MAX_INPUT_BYTES / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`,
+    description: `Evaluate supplied state with independent Choice, Score, and Noul questions in one ${resolveBackend(backend).label} request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${consent.text} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${DEFAULT_MAX_INPUT_BYTES / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`,
     promptSnippet: `Ask batched structured questions with ${resolveBackend(backend).label} (external service; operator opt-in required)`,
     promptGuidelines: [
       // The payload shape is what models get wrong on the first call; the same sample the playground edits is the cheapest way to show it.
@@ -168,14 +171,27 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           const today = spend
             ? `Today ${spend.today.requestsStarted} requests (${spend.today.requestsSucceeded} ok, ${spend.today.requestsFailed} failed), ${spend.today.inputTokens} input tokens, ~$${spend.today.estimatedUsd.toFixed(4)}.`
             : "";
-          const blocked = spend?.blocked ? ` Cap reached: ${spend.blocked.cap} ${spend.blocked.used}/${spend.blocked.limit} on ${spend.blocked.day}; no request will be submitted until the local day rolls over.` : "";
+          const blocked = spend?.blocked ? `Cap reached: ${spend.blocked.cap} ${spend.blocked.used}/${spend.blocked.limit} on ${spend.blocked.day}; no request will be submitted until the local day rolls over.` : "";
           // The backend, host, and key source lead, so a status line cannot describe the TypeSafe key while another
-          // backend serves the requests. Model names the one actually sent on this backend.
+          // backend serves the requests. The model is named once: by `Model:` when the consent sentence is the fixed
+          // one that names none, otherwise by the consent sentence itself. An unusable name sends nothing, so that
+          // status names no model and quotes no consent.
           const route = backendError !== undefined
             ? `Backend: ${BACKEND_ENV} is invalid — ${backendError} Judgments are skipped.`
-            : backendLine(backend, model);
-          const version = `Model: ${model ?? defaultModelId(backend)}.`;
-          report(`TypeSafe: ${enabled ? "enabled" : "disabled"}. ${route} ${auth.text} ${session} ${today}${blocked} ${version} ${backend === DEFAULT_BACKEND ? "" : `Set ${MODEL_ENV} to send another model. `}Session limits reset on session start/reload; daily counters persist and caps come from client options or PI_TYPESAFE_MAX_* environment variables. ${disclosure}`, (auth.level === "error" && enabled) || backendError !== undefined ? "warning" : "info");
+            : backendLine(backend);
+          const version = backendError === undefined && !consent.namesModel ? `Model: ${sentModelId(backend, model)}.` : "";
+          report([
+            `TypeSafe: ${enabled ? "enabled" : "disabled"}.`,
+            route,
+            auth.text,
+            session,
+            today,
+            blocked,
+            version,
+            backend === DEFAULT_BACKEND ? "" : `Set ${MODEL_ENV} to send another model.`,
+            "Session limits reset on session start/reload; daily counters persist and caps come from client options or PI_TYPESAFE_MAX_* environment variables.",
+            backendError === undefined ? consent.text : "",
+          ].filter((part) => part !== "").join(" "), (auth.level === "error" && enabled) || backendError !== undefined ? "warning" : "info");
           return;
         }
         if (action === "logout") {
@@ -231,7 +247,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         if (action === "enable") {
           if (situation.kind === "missing") { report("Run /typesafe login first: no API key is configured.", "warning"); return; }
           if (situation.kind === "unusable") { report(`The stored key cannot be used. ${situation.reason}`, "warning"); return; }
-          if (await ctx.ui.confirm("Enable TypeSafe for this session?", disclosure)) {
+          if (await ctx.ui.confirm("Enable TypeSafe for this session?", consent.text)) {
             enabled = true;
             report(`TypeSafe enabled. Up to ${DEFAULT_MAX_REQUESTS} attempts in this session; /typesafe disable stops future agent calls.`);
           }
@@ -244,7 +260,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           try { request = JSON.parse(text); } catch { report("Invalid JSON. Keep quoted strings on one line; nothing was sent.", "error"); return; }
         }
         const validated = prepareEvaluationRequest(request);
-        if (!await ctx.ui.confirm("Send this TypeSafe request?", disclosure)) return;
+        if (!await ctx.ui.confirm("Send this TypeSafe request?", consent.text)) return;
         const result = await getClient().evaluate(validated);
         // Playground results stay out of LLM context; the agent tool returns its own results normally.
         pi.appendEntry("typesafe-result", result);
