@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, TypeSafeIntegrationError } from "../src/index.js";
+import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, openUsageLedger, TypeSafeIntegrationError } from "../src/index.js";
 import { safeError } from "../src/errors.js";
 import { APIError } from "@typesafe-ai/sdk";
 import type { Questions, SystemOneRequest } from "../src/index.js";
@@ -15,6 +15,7 @@ export function responseFor(questions: Questions): Response {
       const keys = Object.keys(q.criteria);
       return [id, { type: "choice", choice: keys[0], confidence: 1, probabilities: Object.fromEntries(keys.map((key, i) => [key, i === 0 ? 1 : 0])) }];
     }
+    if (q.type !== "score") throw new Error(`the test reply has no answer for a ${q.type} question`);
     return [id, { type: "score", score: 0, confidence: 1, probabilities: Object.fromEntries(q.criteria.map((_, i) => [i, i === 0 ? 1 : 0])), legend: Object.fromEntries(q.criteria.map((level, i) => [i, level])) }];
   }));
   return Response.json({ model: "jev-test", answers, usage: { input_tokens: 42, output_tokens: 0 } });
@@ -66,12 +67,40 @@ test("official SDK helpers, typed answers, metadata, and one batched network cal
   assert.equal(spend.blocked, undefined);
 });
 
-test("structured state, descriptions, and null values are supported", () => {
-  assert.doesNotThrow(() => parseEvaluationRequest({ state: null, questions: {
+test("an unreported token count is counted as nothing, not priced, and not printed as garbage", async () => {
+  const ledger = openUsageLedger({ path: join(mkdtempSync(join(tmpdir(), "pi-typesafe-null-usage-")), "usage.json") });
+  const client = createTypeSafe({ apiKey: "test-key", ledger, fetch: async () =>
+    Response.json({ model: "jev-test", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: null, output_tokens: null } }) });
+  const result = await client.evaluate(sample());
+  assert.equal(result.answers.yes.noul, 0.9);
+  assert.equal(result.usage.input_tokens, null, "the caller still sees what the API reported");
+  assert.deepEqual(client.getUsage(), { requestsStarted: 1, requestsSucceeded: 1, requestsFailed: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 });
+  const spend = client.getSpend();
+  assert.equal(spend.today.inputTokens, 0);
+  assert.equal(spend.today.outputTokens, 0);
+  assert.equal(spend.today.estimatedUsd, 0);
+  assert.equal(spend.blocked, undefined);
+  assert.equal(/NaN|null|undefined/.test(ledger.describe({})), false, ledger.describe({}));
+});
+
+test("a box question is refused by name before any request leaves the process", async () => {
+  let calls = 0;
+  const client = createTypeSafe({ apiKey: "test-key", fetch: async () => { calls++; return Response.json({}); } });
+  await assert.rejects(client.evaluate({ state: "synthetic", questions: { target: { type: "box", instructions: "Where is the logo?" } } }), (error: unknown) =>
+    error instanceof TypeSafeIntegrationError && error.code === "validation" && error.message.includes('questions.target.type: "box" is not a question type this package sends'));
+  assert.equal(calls, 0);
+  assert.equal(client.getUsage().requestsStarted, 0);
+});
+
+test("structured state, descriptions, and null values are supported, but a null state is refused", () => {
+  assert.doesNotThrow(() => parseEvaluationRequest({ state: { goal: "Check" }, questions: {
     yes: noul({ goal: "Check" }, { true: ["a"], false: null }),
     pick: choice(["Choose"], { a: { detail: "a" }, b: null }),
     rating: score(null, [null, { level: "high" }]),
   } }));
+  // 0.7.0 types state as non-null, so a null state is refused by name instead of sent.
+  assert.throws(() => parseEvaluationRequest({ state: null, questions: { yes: noul("Is this synthetic?") } }), (error: unknown) =>
+    error instanceof TypeSafeIntegrationError && error.code === "validation" && error.message.startsWith("state must not be null"));
 });
 
 test("invalid questions are rejected before network submission without echoing state", async () => {

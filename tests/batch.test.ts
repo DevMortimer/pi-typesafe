@@ -172,3 +172,15 @@ test("a daily cap stops the batch with the cap named", async () => {
   assert.ok(second.error instanceof TypeSafeIntegrationError && second.error.code === "budget");
   assert.ok(second.error.message.includes("daily request cap"));
 });
+
+test("an unreported token count adds nothing to the batch usage", async () => {
+  const questions = manyQuestions(2);
+  const client = createTypeSafe({
+    ledger: ledgerFor("null-usage"),
+    fetch: async () => Response.json({ model: "jev-test", answers: Object.fromEntries(Object.keys(questions).map(id => [id, { type: "noul", noul: 0.5 }])), usage: { input_tokens: null, output_tokens: null } }),
+  });
+  const batch = await client.evaluateAll({ state: "many", questions });
+  assert.equal(batch.ok, true);
+  assert.deepEqual(batch.usage, { input_tokens: 0, output_tokens: 0 });
+  assert.equal(client.getSpend().today.inputTokens, 0);
+});

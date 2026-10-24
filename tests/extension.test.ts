@@ -561,3 +561,17 @@ test("an invalid backend name declines login and logout without touching the sto
     clearStoredApiKey();
   }
 });
+
+test("an unreported token count is named in the result, not printed as null", async () => {
+  await withFetch(async () => Response.json({ model: "jev-test", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: null, output_tokens: null } }), async () => {
+    confirmResult = true;
+    await runCommand("enable");
+    const result = await runTool();
+    const renderer = tool.definition.renderResult;
+    assert.ok(renderer);
+    const component = Reflect.apply(renderer, tool.definition, [result, { expanded: true, isPartial: false }, {}]);
+    const text = (component.render(80) as string[]).join("\n");
+    assert.ok(text.includes("not reported input / not reported output tokens"), text);
+    assert.equal(text.includes("null"), false, text);
+  });
+});

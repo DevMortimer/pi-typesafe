@@ -19,6 +19,7 @@ function responseFor(questions: Questions): Response {
       const keys = Object.keys(q.criteria);
       return [id, { type: "choice", choice: keys[0], confidence: 1, probabilities: Object.fromEntries(keys.map((key, i) => [key, i === 0 ? 1 : 0])) }];
     }
+    if (q.type !== "score") throw new Error(`the test reply has no answer for a ${q.type} question`);
     return [id, { type: "score", score: 0, confidence: 1, probabilities: Object.fromEntries(q.criteria.map((_, i) => [i, i === 0 ? 1 : 0])), legend: Object.fromEntries(q.criteria.map((level, i) => [i, level])) }];
   }));
   return Response.json({ model: "jev-test", answers, usage: { input_tokens: 42, output_tokens: 0 } });

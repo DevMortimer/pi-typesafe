@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- A `box` question is refused with a `validation` error that names it. `@typesafe-ai/sdk` 0.7.0 added the type, which locates a subject in the request's image; this package sends `noul`, `choice`, and `score`, and its state carries no image.
+- A `null` state is refused with a `validation` error that names it, because 0.7.0 types `state` as a non-null entry.
+- A token count the API did not report (`usage.input_tokens` or `output_tokens` is `null` in 0.7.0) adds nothing to the session or daily totals and costs nothing, and the result renders it as `not reported` instead of `null`.
+- Requests are sent uncompressed. 0.7.0 compresses any body of 1 KiB or more with zstd by default, and none of this package's five backends is measured for that encoding.
+
 ## 0.12.0
 
 ### Added

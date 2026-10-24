@@ -26,12 +26,10 @@ export const DEFAULT_BACKEND_LIMITS: BackendLimits = Object.freeze({ maxQuestion
 
 // The API accepts structured descriptions, not only strings. The schema is the only shape guidance the model gets
 // before its first call, so every field the agent authors says what it means.
-const entry = (description?: string) => Type.Union([
-  Type.String(),
-  Type.Null(),
-  Type.Array(Type.Unknown()),
-  Type.Record(Type.String(), Type.Unknown()),
-], description === undefined ? {} : { description });
+const content = () => [Type.String(), Type.Array(Type.Unknown()), Type.Record(Type.String(), Type.Unknown())];
+const entry = (description?: string) => Type.Union([...content(), Type.Null()], description === undefined ? {} : { description });
+/** `state` alone is non-null: @typesafe-ai/sdk 0.7.0 types it as `NonNullable<EntryType>`. */
+const state = Type.Union(content(), { description: "What to judge: text, or an object whose fields the questions name. Not null." });
 const instructions = Type.Optional(entry("One judgment about the whole state, phrased as a question or a statement."));
 const question = Type.Union([
   Type.Object({
@@ -60,7 +58,7 @@ const question = Type.Union([
 
 /** The JSON schema used by both the Pi tool and the programmatic interface. */
 export const evaluationSchema = Type.Object({
-  state: entry("What to judge: text, or an object whose fields the questions name."),
+  state,
   questions: Type.Record(Type.String({ minLength: 1, maxLength: 100 }), question, {
     minProperties: 1,
     maxProperties: DEFAULT_MAX_QUESTIONS,
@@ -70,6 +68,29 @@ export const evaluationSchema = Type.Object({
 }, { additionalProperties: false });
 
 const usage = `Expected { state, questions: { <id>: { type: "choice", instructions, criteria: { label: description|null } } | { type: "score", instructions, criteria: [level0, level1, ...] } | { type: "noul", instructions } } }; 1–${DEFAULT_MAX_QUESTIONS} questions, Choice 1–64 options, Score 2–32 levels.`;
+
+/** Question types this package sends. The SDK also offers `box`, which locates a subject in the request's image. */
+const SUPPORTED_QUESTION_TYPES = new Set(["noul", "choice", "score"]);
+
+/**
+ * Name the two refusals the schema can otherwise only report as a union mismatch: a `box` question, and a `null`
+ * state. Both are shapes @typesafe-ai/sdk 0.7.0 added or tightened; neither is something this package can send.
+ */
+function refuseUnsupported(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const request = value as Record<string, unknown>;
+  if (request.state === null) {
+    throw new TypeSafeIntegrationError("validation", `state must not be null: send what to judge as text, an object, or an array. ${usage}`);
+  }
+  const questions = request.questions;
+  if (!questions || typeof questions !== "object" || Array.isArray(questions)) return;
+  for (const [id, question] of Object.entries(questions as Record<string, unknown>)) {
+    const type = question && typeof question === "object" && !Array.isArray(question) ? (question as Record<string, unknown>).type : undefined;
+    if (typeof type === "string" && !SUPPORTED_QUESTION_TYPES.has(type)) {
+      throw new TypeSafeIntegrationError("validation", `Invalid evaluation request at questions.${id.slice(0, 100)}.type: ${JSON.stringify(type.slice(0, 40))} is not a question type this package sends. ${usage}`);
+    }
+  }
+}
 
 /** Paths and messages only; never the submitted values. */
 function describeSchemaErrors(value: unknown): string {
@@ -87,6 +108,7 @@ export function parseEvaluationRequest(value: unknown): SystemOneRequest {
   if (value !== null && typeof value === "object" && !Array.isArray(value) && !isJsonSafe(value)) {
     throw new TypeSafeIntegrationError("validation", `Invalid evaluation request: state and questions must be plain JSON. ${usage}`);
   }
+  refuseUnsupported(value);
   if (!Check(evaluationSchema, value)) {
     throw new TypeSafeIntegrationError("validation", `Invalid evaluation request at ${describeSchemaErrors(value)}. ${usage}`);
   }
