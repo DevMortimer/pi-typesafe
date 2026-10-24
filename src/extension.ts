@@ -44,16 +44,20 @@ const sample = {
   },
 };
 
+/** 0.7.0 reports a count it did not measure as null; name it instead of printing "null". */
+const formatNumber = (count: number | null): string => (count === null ? "not reported" : String(count));
+
 function format(result: Evaluation<Questions>, expanded = false): string {
   const lines = [`TypeSafe · ${JSON.stringify(result.model)} · ${result.elapsedMs} ms`];
   for (const [id, answer] of Object.entries(result.answers)) {
     const label = JSON.stringify(id);
     if (answer.type === "noul") lines.push(`${label}: P(yes) = ${answer.noul.toFixed(3)}`);
     else if (answer.type === "choice") lines.push(`${label}: ${JSON.stringify(answer.choice)} · confidence ${answer.confidence.toFixed(3)}`);
-    else lines.push(`${label}: ${answer.score.toFixed(3)} · confidence ${answer.confidence.toFixed(3)}`);
-    if (expanded && answer.type !== "noul") lines.push(`  ${JSON.stringify(answer.probabilities)}`);
+    else if (answer.type === "score") lines.push(`${label}: ${answer.score.toFixed(3)} · confidence ${answer.confidence.toFixed(3)}`);
+    else lines.push(`${label}: box ${JSON.stringify(answer.box)} · confidence ${formatNumber(answer.confidence)}`);
+    if (expanded && (answer.type === "choice" || answer.type === "score")) lines.push(`  ${JSON.stringify(answer.probabilities)}`);
   }
-  lines.push(`${result.usage.input_tokens} input / ${result.usage.output_tokens} output tokens`);
+  lines.push(`${formatNumber(result.usage.input_tokens)} input / ${formatNumber(result.usage.output_tokens)} output tokens`);
   lines.push("Confidence is distribution concentration, not proof of correctness.");
   return lines.join("\n");
 }

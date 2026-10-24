@@ -151,8 +151,9 @@ function positiveNumber(value: number, label: string): number {
 function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions: Q): boolean {
   const probability = (value: number) => Number.isFinite(value) && value >= 0 && value <= 1;
   if (!result || typeof result.model !== "string" || !result.model || !result.usage || !result.answers) return false;
+  // 0.7.0 reports a token count it did not measure as null; that is not malformed, it is unreported.
   for (const count of [result.usage.input_tokens, result.usage.output_tokens]) {
-    if (!Number.isSafeInteger(count) || count < 0) return false;
+    if (count !== null && (!Number.isSafeInteger(count) || count < 0)) return false;
   }
   if (Object.keys(result.answers).length !== Object.keys(questions).length) return false;
   for (const [id, question] of Object.entries(questions)) {
@@ -162,13 +163,17 @@ function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions:
       if (!probability(answer.noul)) return false;
       continue;
     }
+    // A box answer answers a question this package refuses to send, so it never validates.
+    if (answer.type === "box") return false;
     if (!probability(answer.confidence) || !answer.probabilities) return false;
+    // Rubric length, not its elements: 0.7.0's content type is recursive and mapping it exhausts the compiler.
     const keys = question.type === "choice" ? Object.keys(question.criteria)
-      : question.type === "score" ? question.criteria.map((_, index) => String(index)) : [];
+      : question.type === "score" ? Array.from({ length: question.criteria.length }, (_, index) => String(index)) : [];
     const probabilities = new Map(Object.entries(answer.probabilities));
     if (probabilities.size !== keys.length || keys.some(key => !probability(probabilities.get(key) ?? NaN))) return false;
     if (answer.type === "choice" && !keys.includes(answer.choice)) return false;
-    if (answer.type === "score" && (!Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !answer.legend)) return false;
+    // Presence of own `legend`, not its value: 0.7.0's legend type carries the recursive content type, which exhausts the compiler.
+    if (answer.type === "score" && (!Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !Object.hasOwn(answer, "legend"))) return false;
   }
   return true;
 }
@@ -233,6 +238,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     baseURL,
     timeout,
     retry: { maxRetries: 0 },
+    // 0.7.0 zstd-compresses any body of 1 KiB or more by default; this package's five backends are unmeasured for it.
+    compression: false,
     logLevel: "off",
     ...(transport ? { fetch: transport } : {}),
   });
@@ -301,12 +308,15 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         const result = await client.systemOne(request, callOptions);
         if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected answer or usage format.");
         usage.requestsSucceeded += 1;
-        usage.inputTokens += result.usage.input_tokens;
-        usage.outputTokens += result.usage.output_tokens;
+        // An unreported count is not a count this package can add, price, or charge against a token cap.
+        const inputTokens = result.usage.input_tokens ?? 0;
+        const outputTokens = result.usage.output_tokens ?? 0;
+        usage.inputTokens += inputTokens;
+        usage.outputTokens += outputTokens;
         // Unrounded: a small request must still count toward the cap.
-        const cost = (result.usage.input_tokens * rateFor(sentModel)) / 1e6;
+        const cost = (inputTokens * rateFor(sentModel)) / 1e6;
         sessionUsd += cost;
-        ledger.recordSuccess(result.usage.input_tokens, result.usage.output_tokens, cost);
+        ledger.recordSuccess(inputTokens, outputTokens, cost);
         if (!verificationRecorded) {
           verificationRecorded = true;
           recordAuthVerified();

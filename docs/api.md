@@ -69,7 +69,7 @@ Every backend takes its key from its own environment variable first, then from t
 
 ## Admission
 
-`prepareEvaluationRequest(value, { maxInputBytes, limits })` is the one admission rule, used by the tool, the playground, and `evaluate`. It normalizes the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), validates the schema and JSON-safety, checks `limits` when given, then enforces the byte budget. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
+`prepareEvaluationRequest(value, { maxInputBytes, limits })` is the one admission rule, used by the tool, the playground, and `evaluate`. It normalizes the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), validates the schema and JSON-safety, checks `limits` when given, then enforces the byte budget. Two shapes it refuses by name: a `box` question — 0.7.0's own question type for locating a subject in the request's image, while this package sends only `noul`, `choice`, and `score` — and a `null` state, which 0.7.0 no longer accepts. Both raise a `validation` error that names the field. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
 
 ## Limits
 
@@ -109,7 +109,7 @@ Day caps live in `~/.pi/agent/pi-typesafe/usage.json` (owner-only, atomic, best-
 | `maxInputTokensPerDay` | `PI_TYPESAFE_MAX_INPUT_TOKENS_PER_DAY` | input tokens |
 | `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | estimated spend |
 
-The environment may lower an explicit cap, never raise it. A reached cap raises a `budget` error that names the cap, the amount used, and the day, before anything is submitted. Cost is estimated from input tokens only, because output is free. Each request is priced when it is recorded, at its own model's price, so one ledger can hold requests to backends and models with different prices and the day's spend, and the `maxUsdPerDay` cap, add up what each request cost; requests to a free model add nothing. A ledger file written before costs were recorded keeps working: days without a recorded cost are estimated at the ledger's `usdPerMTok` (default `0.042`).
+The environment may lower an explicit cap, never raise it. A reached cap raises a `budget` error that names the cap, the amount used, and the day, before anything is submitted. Cost is estimated from input tokens only, because output is free. Each request is priced when it is recorded, at its own model's price, so one ledger can hold requests to backends and models with different prices and the day's spend, and the `maxUsdPerDay` cap, add up what each request cost; requests to a free model add nothing. A token count the API did not report (0.7.0 reports `null`) adds nothing to the session or daily totals and is priced at zero, because there is nothing to count or price; the request still counts as an attempt against the request cap. A ledger file written before costs were recorded keeps working: days without a recorded cost are estimated at the ledger's `usdPerMTok` (default `0.042`).
 
 `openUsageLedger(options)`, `usagePath()`, `estimateUsd(tokens, usdPerMTok)`, `capsFromEnvironment(env)`, and `mergeCaps(explicit, environment)` expose the same arithmetic for your own display.
 

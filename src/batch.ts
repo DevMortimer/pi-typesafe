@@ -75,7 +75,7 @@ export interface BatchEvaluation<Q extends Questions = Questions> {
   readonly answers: Partial<Evaluation<Q>["answers"]>;
   /** The model of the first successful request, when there is one. */
   readonly model?: string;
-  /** Usage summed over the requests that succeeded. */
+  /** Usage summed over the requests that succeeded; a token count the API did not report adds nothing. */
   readonly usage: Usage;
   /** Wall-clock time for the whole batch. */
   readonly elapsedMs: number;
@@ -95,8 +95,8 @@ function summarize<Q extends Questions>(results: readonly Settled<Evaluation<Q>>
     }
     succeeded++;
     Object.assign(answers, result.value.answers);
-    inputTokens += result.value.usage.input_tokens;
-    outputTokens += result.value.usage.output_tokens;
+    inputTokens += result.value.usage.input_tokens ?? 0;
+    outputTokens += result.value.usage.output_tokens ?? 0;
     model ??= result.value.model;
   }
   return {

@@ -83,3 +83,12 @@ test("every field the agent authors carries a description, so a bare union is no
   // `true` and `false` inside noul criteria are the only fields whose parent already explains them.
   assert.deepEqual(undescribed.filter(name => name !== "true" && name !== "false"), [], "every authored field must say what it means");
 });
+
+test("a box question is refused by name, and a null state is refused, before the schema reports a bare union", () => {
+  const names = (pattern: RegExp) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "validation" && pattern.test(error.message);
+  assert.throws(() => prepareEvaluationRequest({ state: "s", questions: { target: { type: "box", instructions: "Where is the logo?" } } }),
+    names(/questions\.target\.type: "box" is not a question type this package sends/));
+  // 0.7.0 requires a state that is not null, so the request is refused instead of sent with a null state.
+  assert.throws(() => prepareEvaluationRequest({ state: null, questions: { yes: { type: "noul", instructions: "?" } } }), names(/^state must not be null/));
+  assert.doesNotThrow(() => prepareEvaluationRequest({ state: "s", questions: { yes: { type: "noul", instructions: "?" } } }));
+});
