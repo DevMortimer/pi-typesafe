@@ -109,7 +109,8 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
 export function backendConfig(name: TypeSafeBackend): RegistryBackendConfig {
-  const backend = DECISIONS_BACKENDS[name];
+  // A bare lookup finds `toString` on Object.prototype, so only an own entry is a backend.
+  const backend = Object.hasOwn(DECISIONS_BACKENDS, name) ? DECISIONS_BACKENDS[name] : undefined;
   if (!backend) throw new TypeSafeIntegrationError("configuration", `Unknown judgment backend "${name}". Valid backends: ${Object.keys(DECISIONS_BACKENDS).join(", ")}.`);
   return backend;
 }

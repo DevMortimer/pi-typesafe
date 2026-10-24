@@ -390,6 +390,22 @@ test("an invalid PI_TYPESAFE_BACKEND fails loudly instead of sending judgments",
   }
 });
 
+test("an inherited property name is refused, and the extension still loads its tool and command", async () => {
+  for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+    process.env.PI_TYPESAFE_BACKEND = name;
+    try {
+      const scoped = await reloadExtension();
+      await Reflect.apply(scoped.command.handler, scoped.command, ["status", ctx]);
+      const line = notices.at(-1) ?? "";
+      assert.ok(line.includes("PI_TYPESAFE_BACKEND is invalid"), `${name}: ${line}`);
+      assert.ok(line.includes(`Unknown judgment backend "${name}"`), `${name}: ${line}`);
+      await assert.rejects(runScopedTool(scoped.tool), /Unknown judgment backend/);
+    } finally {
+      delete process.env.PI_TYPESAFE_BACKEND;
+    }
+  }
+});
+
 test("login and logout refuse on a backend that does not use the TypeSafe key store", async () => {
   process.env.PI_TYPESAFE_BACKEND = "openrouter";
   process.env.OPENROUTER_API_KEY = "or_fake_key_0123456789abcdef";

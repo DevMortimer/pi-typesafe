@@ -425,6 +425,19 @@ test("backendFromEnvironment reads PI_TYPESAFE_BACKEND and default only when uns
   );
 });
 
+test("an inherited property name is not a backend", () => {
+  // A bare registry lookup finds these on Object.prototype and registers a backend that breaks the extension.
+  for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
+    assert.throws(
+      () => backendFromEnvironment({ [BACKEND_ENV]: name }),
+      (error: unknown) => error instanceof TypeSafeIntegrationError
+        && error.code === "configuration"
+        && error.message.includes(`Unknown judgment backend "${name}"`),
+      name,
+    );
+  }
+});
+
 test("modelFromEnvironment reads PI_TYPESAFE_MODEL and leaves the backend default alone when unset", () => {
   assert.equal(modelFromEnvironment({}), undefined);
   assert.equal(modelFromEnvironment({ [MODEL_ENV]: "" }), undefined);
