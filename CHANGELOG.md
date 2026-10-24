@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.11.0
+
+### Added
+
+- The `/typesafe` commands and the `typesafe_evaluate` tool follow `PI_TYPESAFE_BACKEND` (`typesafe` by default) and `PI_TYPESAFE_MODEL`, and name the backend's host, key variable, and model in their consent and status text. The printed id comes from the same `sentModelId` the client sends, so `PI_TYPESAFE_BACKEND=openrouter PI_TYPESAFE_MODEL=jev-1.14` reads and sends `typesafe/jev-1.14`. A name the registry does not know is a `configuration` error at session start, not a silent fallback to TypeSafe. `sentModelId`, `BACKEND_ENV`, `MODEL_ENV`, `backendFromEnvironment`, and `modelFromEnvironment` are exported and documented in [docs/api.md](docs/api.md).
+
+### Changed
+
+- The consent sentence names the host, the backend, and the model sent whenever either variable is set; with both unset it is the same sentence as before. The README's "What is sent?" no longer says every request goes to `api.typesafe.ai` only.
+- `/typesafe status` names the model once. The backend line gives the host and the key variable, `Model:` appears only when the consent sentence does not name the model, the stray double space is gone, and a status taken with an unusable backend name claims no model.
+- `/typesafe login` and `/typesafe logout` decline while `PI_TYPESAFE_BACKEND` names no backend the registry knows, because no key change can make that name work. Before, login prompted for a key nothing would read and logout deleted the stored key.
+
+### Fixed
+
+- `PI_TYPESAFE_BACKEND=toString` — and `constructor`, `__proto__`, `hasOwnProperty` — passed the unknown-name check through `Object.prototype`, after which registration threw `TypeError: model.includes is not a function` and Pi loaded neither the tool nor the commands. The registry lookup now requires an own entry, so the name is refused as unknown and the extension still loads.
+
 ## 0.10.0
 
 ### Added
