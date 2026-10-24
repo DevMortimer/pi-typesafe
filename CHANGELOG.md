@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.12.0
+
+### Added
+
+- The login store keeps one key per judgment backend: a registry name, or an endpoint's `keyEnv`. `keySituation`, `authState`, `ensureApiKey`, and `createTypeSafe` read the key stored for the backend in play, so a key stored for one backend is never sent to another. A backend's own environment variable still wins over its stored key.
+- `/typesafe login [backend]` prompts with that backend's name, proves the key before saving, and stores it under that backend. TypeSafe and Liquid AI are proved with their model list, which checks the key; SubQ, OpenRouter, and Command Code are proved with one judge request, because their public model list accepts any key. A failed proof stores nothing.
+- `/typesafe logout [backend]` removes one backend's key and leaves the others. With no backend named, both commands act on the session's own backend (`PI_TYPESAFE_BACKEND`), and a logout of that backend turns judgments off for the session.
+
+### Changed
+
+- `/typesafe login` and `/typesafe logout` no longer decline on a backend other than TypeSafe. One rule now covers every backend: the stored key is used unless the backend's environment variable is set, and then the variable wins. On a backend whose variable is set, `login` says so instead of prompting, and `logout` removes the stored key while saying the variable still wins.
+- The README and `.env.example` no longer say that `/typesafe login` does not apply to another backend.
+
+### Removed
+
+- `usesTypesafeKey` is no longer exported: every backend has a login store now, so no caller needs to ask. This is a minor release, per CONTRIBUTING.
+
+### Fixed
+
+- `ask`'s deadline fired only while some other handle kept the Node event loop alive. `AbortSignal.timeout`'s timer is unref'd, so a call whose only pending work was the deadline never settled and CI reported it as `Promise resolution is still pending but the event loop has already resolved` on Node 22.19.0. The deadline is now a ref'd timer cleared when the call settles, so the documented `timeoutMs` bounds the call on every supported Node version.
+
+### Storage and downgrade
+
+- The store file is now `{ "version": 1, "keys": { "<backend>": "<key>" } }`, written under a temporary name and renamed whole. A pre-0.12 file `{ "apiKey": "..." }` reads as the TypeSafe key and is rewritten in the new shape on the next save.
+- A 0.11.0 release run against a 0.12.0 store reads no TypeSafe key (it sees `missing`, not corruption) and does not touch another backend's key. If that older release saves a key, it rewrites the file in the old shape, and the other backends' stored keys are dropped; those backends fall back to their environment variables.
+
 ## 0.11.0
 
 ### Added

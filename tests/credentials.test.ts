@@ -36,7 +36,7 @@ test("store, read, and clear with owner-only permissions", () => {
   assert.equal(path, credentialsPath());
   assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.equal(statSync(join(agentDir, "pi-typesafe")).mode & 0o777, 0o700);
-  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { apiKey: validKey });
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { version: 1, keys: { typesafe: validKey } });
   assert.deepEqual(resolveApiKey(), { key: validKey, source: "stored" });
   assert.equal(clearStoredApiKey(), true);
   assert.equal(clearStoredApiKey(), false);
@@ -141,4 +141,46 @@ test("keySourceLabel names each source", () => {
   assert.equal(keySourceLabel({ kind: "stored", key: "k", path: "/tmp/auth.json" }), "/typesafe login");
   assert.equal(keySourceLabel({ kind: "missing" }), "no key");
   assert.equal(keySourceLabel({ kind: "unusable", path: "/tmp/auth.json", reason: "r" }), "unusable key");
+});
+
+test("each backend keeps its own stored key, and an endpoint is keyed by its keyEnv", () => {
+  const savedSubq = process.env.SUBQ_API_KEY;
+  delete process.env.SUBQ_API_KEY;
+  try {
+  const subqKey = "sq_test_key_0123456789abcdef";
+  assert.equal(storeApiKey(validKey), credentialsPath());
+  assert.equal(storeApiKey(subqKey, "subq"), credentialsPath());
+  assert.deepEqual(JSON.parse(readFileSync(credentialsPath(), "utf8")), { version: 1, keys: { typesafe: validKey, subq: subqKey } });
+  assert.equal(readStoredApiKey(), validKey);
+  assert.equal(readStoredApiKey("subq"), subqKey);
+  assert.equal(keySituation("subq").kind, "stored");
+  // A key stored for one backend is never read as another backend's key.
+  assert.equal(readStoredApiKey("openrouter"), undefined);
+  assert.equal(keySituation("openrouter").kind, "missing");
+  const gateway = { label: "Gateway", host: "https://gw.example.com", keyEnv: "GATEWAY_JEV_KEY", defaultModel: "jev-latest" } as const;
+  const gwKey = "gw_test_key_0123456789abcdefg";
+  assert.equal(storeApiKey(gwKey, gateway), credentialsPath());
+  assert.equal(readStoredApiKey(gateway), gwKey);
+  assert.equal(readStoredApiKey("typesafe"), validKey, "the endpoint's key does not replace the TypeSafe key");
+
+  assert.equal(clearStoredApiKey("subq"), true);
+  assert.equal(readStoredApiKey("subq"), undefined);
+  assert.equal(readStoredApiKey(), validKey, "clearing one backend leaves the others");
+  assert.equal(clearStoredApiKey("subq"), false);
+  assert.equal(clearStoredApiKey(), true, "no argument clears every stored key");
+  assert.equal(readStoredApiKey(gateway), undefined);
+  } finally {
+    if (savedSubq === undefined) delete process.env.SUBQ_API_KEY; else process.env.SUBQ_API_KEY = savedSubq;
+  }
+});
+
+test("a pre-0.12 store with a lone apiKey reads as the TypeSafe key", () => {
+  const path = credentialsPath();
+  mkdirSync(join(agentDir, "pi-typesafe"), { recursive: true, mode: 0o700 });
+  writeFileSync(path, `${JSON.stringify({ apiKey: validKey })}\n`, { mode: 0o600 });
+  assert.equal(readStoredApiKey(), validKey);
+  assert.equal(readStoredApiKey("subq"), undefined);
+  // The next write migrates the file to the per-backend shape.
+  storeApiKey("sq_test_key_0123456789abcdef", "subq");
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { version: 1, keys: { typesafe: validKey, subq: "sq_test_key_0123456789abcdef" } });
 });

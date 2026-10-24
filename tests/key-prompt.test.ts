@@ -45,3 +45,13 @@ test("falls back to Pi's plain input when custom UI is unavailable", async () =>
   const ctx = { hasUI: true, ui: { input: async () => "  ts_plain_key_0123456789  " } } as unknown as ExtensionCommandContext;
   assert.equal(await promptForApiKey(ctx), "  ts_plain_key_0123456789  ");
 });
+
+test("the prompt names the backend whose key it asks for", async () => {
+  let screen = "";
+  const key = await promptForApiKey(fakeContext(component => {
+    screen = component.render(60).join("\n");
+    component.handleInput("\r");
+  }), "OpenRouter");
+  assert.ok(screen.includes("OpenRouter API key"), screen);
+  assert.equal(key, "");
+});

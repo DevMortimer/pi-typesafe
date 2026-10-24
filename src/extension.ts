@@ -2,8 +2,8 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-
 import type { Static } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { Questions } from "@typesafe-ai/sdk";
-import { BACKEND_ENV, DEFAULT_BACKEND, MODEL_ENV, backendFromEnvironment, backendHost, modelFromEnvironment, resolveBackend, sentModelId } from "./backends.js";
-import type { TypeSafeBackend } from "./backends.js";
+import { BACKEND_ENV, DEFAULT_BACKEND, DECISIONS_BACKENDS, MODEL_ENV, backendFromEnvironment, backendHost, modelFromEnvironment, resolveBackend, sentModelId } from "./backends.js";
+import type { BackendSpec, TypeSafeBackend } from "./backends.js";
 import { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
 import { authState, clearAuthState, describeAuth } from "./auth.js";
@@ -72,7 +72,6 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     backend = DEFAULT_BACKEND;
     backendError = safeError(error).message;
   }
-  const typesafeKey = backend === DEFAULT_BACKEND;
   const consent = consentFor(backend, model);
   let client: TypeSafe | undefined;
   // One callout per distinct degradation per session: a long run must not bury the reason in repeated notices.
@@ -152,11 +151,19 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   pi.registerCommand("typesafe", {
     description: "TypeSafe login, consent, usage, sample test, and JSON playground",
     getArgumentCompletions(prefix) {
+      const [verb, ...rest] = prefix.split(/\s+/);
+      if (rest.length && (verb === "login" || verb === "logout")) {
+        const typed = rest.join(" ");
+        const names = (Object.keys(DECISIONS_BACKENDS) as TypeSafeBackend[]).filter(name => name.startsWith(typed));
+        return names.length ? names.map(name => ({ value: `${verb} ${name}`, label: name })) : null;
+      }
       const matches = actions.filter(action => action.startsWith(prefix)).map(action => ({ value: action, label: action }));
       return matches.length ? matches : null;
     },
     async handler(args, ctx) {
-      const action = args.trim() || "status";
+      const [action = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const backendArg = rest[0];
+      const backendChoices = Object.keys(DECISIONS_BACKENDS).join(", ");
       const report = (text: string, level: "info" | "warning" | "error" = "info") => {
         if (ctx.hasUI) ctx.ui.notify(text, level);
         else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
@@ -168,6 +175,12 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         return;
       }
       try {
+        // A backend the command names, or this session's own backend when it names none, so the commands act on
+        // what judgments actually use. resolveBackend refuses a name the registry does not know.
+        const spec: TypeSafeBackend = backendArg === undefined ? backend : backendArg as TypeSafeBackend;
+        const config = resolveBackend(spec);
+        const isActive = config.keyEnv === resolveBackend(backend).keyEnv;
+        const situation = keySituation(backend);
         if (action === "status") {
           const spend = client?.getSpend();
           const auth = describeAuth(authState({ backend }));
@@ -201,16 +214,16 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           return;
         }
         if (action === "logout") {
-          // The store holds a TypeSafe key, so it is not this session's credential on another backend.
-          if (!typesafeKey) {
-            report(`${resolveBackend(backend).label} is the active backend (${BACKEND_ENV}=${backend}), and it reads its key from ${resolveBackend(backend).keyEnv}, not the /typesafe login store. Unset ${BACKEND_ENV} to manage the TypeSafe key.`, "warning");
-            return;
-          }
-          const removed = clearStoredApiKey();
+          const removed = clearStoredApiKey(spec);
           clearAuthState();
           client = undefined;
-          enabled = false;
-          report(removed ? `Removed the stored key at ${credentialsPath()}. TypeSafe is disabled.` : "No stored key to remove." + (process.env.TYPESAFE_API_KEY?.trim() ? " TYPESAFE_API_KEY is still set in the environment." : ""));
+          const env = process.env[config.keyEnv]?.trim();
+          // A session with consent but no key can only fail the next call; logging out another backend's key changes nothing.
+          if (isActive && !env) enabled = false;
+          const tail = env
+            ? ` ${config.keyEnv} is still set in the environment and takes precedence over a stored key.`
+            : (isActive ? " Judgments are off for this session." : "");
+          report(`${removed ? `Removed the stored ${config.label} key at ${credentialsPath()}.` : `No stored ${config.label} key to remove.`}${tail}`);
           return;
         }
         if (action === "disable") {
@@ -219,28 +232,27 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           return;
         }
         if (!actions.includes(action)) {
-          report(`Usage: /typesafe ${actions.join(" | ")}`, "warning");
+          report(`Usage: /typesafe ${actions.join(" | ")}. login and logout take a backend name: ${backendChoices}.`, "warning");
           return;
         }
         if (!ctx.hasUI) {
-          report("This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and TYPESAFE_API_KEY before launching Pi.", "warning");
-          return;
-        }
-        const situation = keySituation(backend);
-        // `/typesafe login` verifies a key against api.typesafe.ai and stores it for the TypeSafe backend only.
-        if ((action === "login" || (action === "setup" && situation.kind === "missing")) && !typesafeKey) {
-          report(`${resolveBackend(backend).label} is the active backend (${BACKEND_ENV}=${backend}): it reads its key from ${resolveBackend(backend).keyEnv} and never from the /typesafe login store, so login does not apply. Unset ${BACKEND_ENV} to use TypeSafe directly.`, "warning");
+          report(`This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and ${config.keyEnv} before launching Pi.`, "warning");
           return;
         }
         if (action === "login" || (action === "setup" && situation.kind === "missing")) {
-          if (process.env.TYPESAFE_API_KEY?.trim()) {
-            report("TYPESAFE_API_KEY is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.", "warning");
+          // The one rule for every backend: the stored key is used unless the backend's variable is set, and then it wins.
+          if (process.env[config.keyEnv]?.trim()) {
+            report(`${config.keyEnv} is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.`, "warning");
             return;
           }
-          const login = await loginWithPrompt(ctx);
+          const login = await loginWithPrompt(ctx, { backend: spec });
           if (login === undefined) { report("Login cancelled; nothing was saved."); return; }
           client = undefined;
-          report(`Key verified (${login.models} model${login.models === 1 ? "" : "s"} available) and saved to ${login.path} with owner-only permissions. Run /typesafe enable to allow agent tool calls.`);
+          const proof = login.models === undefined ? "verified with one request" : `verified (${login.models} model${login.models === 1 ? "" : "s"} available)`;
+          const hint = isActive
+            ? (enabled ? "" : " Run /typesafe enable to allow agent tool calls.")
+            : ` ${BACKEND_ENV} is ${backend}; set it to ${config.name} to send judgments there.`;
+          report(`${config.label} key ${proof} and saved to ${login.path} with owner-only permissions.${hint}`);
           return;
         }
         if (action === "setup") {

@@ -30,13 +30,19 @@ export type AskAnswer<Q extends Questions> =
  * share `prepareEvaluationRequest`, so what one accepts the other accepts.
  */
 export async function ask<Q extends Questions>(judge: Judge, request: SystemOneRequest<Q>, options: AskOptions = {}): Promise<AskAnswer<Q>> {
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS);
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  // AbortSignal.timeout's timer is unref'd, so a deadline that is the only pending work never fires: node:test on
+  // Node 22.19 reported this promise as never settling (CI run 39945731438). A ref'd timer, cleared when the ask
+  // settles, makes the documented deadline real and leaves no handle behind.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), options.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline.signal]) : deadline.signal;
   try {
     const result = await judge.evaluate(request, { signal });
     return { ok: true, answers: result.answers, model: result.model, usage: result.usage, elapsedMs: result.elapsedMs };
   } catch (error) {
     if (error instanceof TypeSafeIntegrationError) return { ok: false, error: error.message, errorCode: error.code };
     return { ok: false, error: FALLBACK_MESSAGE };
+  } finally {
+    clearTimeout(timer);
   }
 }
