@@ -15,6 +15,9 @@ this project prepares draft releases but does not automatically publish to npm.
   package's exports through `dist/`; this also checks the generated declarations
   from a clean checkout. Native Windows is not in this matrix; the existing credential and
   usage tests assert POSIX file permissions.
+- **Check (Bun 1.4.4)** runs the build, the typecheck, and
+  `tests/bun-transport.test.ts` under Bun, because Pi ships as a Bun binary; every
+  test in that file also runs on the Node jobs, so it passes on both runtimes.
 - **Package** builds an actual npm tarball and installs it outside the checkout
   with install scripts disabled. It checks root and calibration imports without
   optional Pi peers, verifies all declared JavaScript and type declaration
@@ -22,7 +25,7 @@ this project prepares draft releases but does not automatically publish to npm.
   versions from `package-lock.json`. It also checks package/lockfile version
   agreement.
 - **CI passed** runs even when another job fails or is skipped, and fails unless
-  all three prerequisites succeeded. This is the stable check to require in the
+  all four prerequisites succeeded. This is the stable check to require in the
   `main` branch rules; do not require only **Package**, which can be skipped.
 
 No TypeSafe or OpenRouter credentials are needed. Tests do not call either
