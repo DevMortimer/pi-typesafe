@@ -59,6 +59,49 @@ async function translateModels(response: Response, backend: BackendConfig): Prom
   return send(JSON.stringify({ models }));
 }
 
+/** Runtime detection rather than a config flag: the transport below differs only because Bun reads a body differently. */
+const BUN_VERSION: string | undefined = (process.versions as { bun?: string }).bun;
+
+/**
+ * A response with no body, answering `text()` and `json()` from bytes already read. Bun 1.4.4 throws `TypeError: Body
+ * already used` from the SDK's own `res.text()`: the SDK's buffering step takes a reader on `response.body` and releases
+ * it, which Bun counts as using the body (measured 28 Oct 2026 on Bun 1.4.4; Node 26 read the body after that step, and
+ * the Node 22.19, 24, and 26 jobs run the same assertion in CI).
+ * A plain `Response` built from a string is stamped by Bun on a reader exactly the same way, so the replay carries no
+ * body for that step to touch. The SDK reads only `status`, `ok`, `headers` and `text()` from a response.
+ */
+class ReplayedResponse extends Response {
+  readonly #body: string;
+  constructor(body: string, init: ResponseInit) {
+    super(null, init);
+    this.#body = body;
+  }
+  override text(): Promise<string> {
+    return Promise.resolve(this.#body);
+  }
+  override json(): Promise<unknown> {
+    return Promise.resolve<unknown>(JSON.parse(this.#body));
+  }
+}
+
+/**
+ * Read the body here and hand the SDK a response that has none, keeping it readable past the SDK's buffering step.
+ * Wraps whatever transport is in play — the default, a path rewrite, or the caller's own — because Bun stamps a response
+ * `translateModels` builds on a reader exactly as it stamps a network one, and two wrappers stacked stay harmless.
+ */
+function readableTransport(inner: Fetch): Fetch {
+  return async (input, init) => {
+    const response = await inner(input, init);
+    // Read under the caller's signal, so an abort still rejects with its reason instead of a half-read body.
+    const body = await response.text();
+    const headers = new Headers(response.headers);
+    // The body is replayed, so a copied length or encoding would describe bytes that are no longer on the wire.
+    headers.delete("content-length");
+    headers.delete("content-encoding");
+    return new ReplayedResponse(body, { status: response.status, statusText: response.statusText, headers });
+  };
+}
+
 export interface TypeSafeOptions {
   /** Defaults to TYPESAFE_API_KEY, then the key saved by `/typesafe login`; never returned. */
   apiKey?: string;
@@ -224,7 +267,9 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
   // A backend with its own paths or model list fields gets a transport that rewrites them; the default backend keeps the caller's.
-  const transport = backend.path !== undefined || backend.modelsPath !== undefined || backend.modelsField !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
+  const routed = backend.path !== undefined || backend.modelsPath !== undefined || backend.modelsField !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
+  // One wrapper ahead of both, so the backend's paths and the caller's own transport are covered; on Node the transport stays as it was.
+  const transport = BUN_VERSION === undefined ? routed : readableTransport(routed ?? fetch);
   // The caller's input is validated as written, then mapped to the backend's id form; omitting it sends the backend's
   // own default, which the mapping leaves unchanged.
   const requested = options.model ?? backend.defaultModel;

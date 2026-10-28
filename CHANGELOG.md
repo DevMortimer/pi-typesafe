@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- A judge request made under Bun no longer fails with `TypeSafe returned an unreadable or unexpected response.` The SDK buffers a response by taking a reader on its body and releasing it, which Bun counts as using the body, so the SDK's own `response.text()` threw `TypeError: Body already used`. Under Bun the transport now reads the body and hands the SDK a replay of it; under Node the transport handed over is unchanged, whether it is the default one or the caller's own. Verified against a local HTTP server with `@typesafe-ai/sdk` 0.7.0, measured under Bun 1.4.4 and Node 26: one request per judgment, the parsed answers returned, a non-2xx status and its headers reported unchanged, and an aborted request still rejected as aborted. The same test file runs on the Node 22.19, 24, and 26 jobs and under Bun in CI.
+
 ## 0.13.0
 
 ### Changed

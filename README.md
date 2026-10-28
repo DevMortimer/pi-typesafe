@@ -24,7 +24,7 @@ Then, inside Pi:
 2. `/typesafe test` sends one built-in sample request and shows the answers.
 3. `/typesafe enable` lets the agent call the tool for this session, after you confirm the data notice.
 
-Requires Pi 0.85 or newer and Node.js 22.19 or newer. Usage is billed to your TypeSafe account. For CI or scripts set `TYPESAFE_API_KEY` in the environment instead; it takes precedence over the stored key. Do not paste the key into chat, command arguments, or project files.
+Requires Pi 0.85 or newer and Node.js 22.19 or newer. It runs under Bun as well, where Pi ships: there the judge transport replays each response body, because Bun 1.4.4 marks a body used once a reader on it is released. Usage is billed to your TypeSafe account. For CI or scripts set `TYPESAFE_API_KEY` in the environment instead; it takes precedence over the stored key. Do not paste the key into chat, command arguments, or project files.
 
 ## The three question types
 
