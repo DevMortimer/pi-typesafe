@@ -28,17 +28,19 @@ function retryAfterSeconds(error: APIError): number | undefined {
 }
 
 /**
- * Classify an error into a message safe to display. `backend` names the key variable the 401 advice tells the user
- * to check and selects the 402 wording; omitting it keeps the one-argument call and assumes the default TypeSafe key.
+ * Classify an error into a message safe to display. The subject of every message is the backend that answered — its
+ * `label`, or the caller's endpoint label — falling back to TypeSafe when no backend is passed. `backend` also names
+ * the key variable the 401 advice tells the user to check and selects the 402 wording.
  */
 export function safeError(error: unknown, backend?: BackendSpec | BackendConfig): TypeSafeIntegrationError {
   if (error instanceof TypeSafeIntegrationError) return error;
-  if (error instanceof APIUserAbortError) return new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled; an already submitted request may still be billed.");
-  if (error instanceof APITimeoutError) return new TypeSafeIntegrationError("timeout", "TypeSafe request timed out; it was not retried and may still be billed.");
+  const config = backend === undefined ? undefined : typeof backend === "string" ? backendConfig(backend) : backend;
+  const subject = config?.label ?? "TypeSafe";
+  const keyEnv = config?.keyEnv ?? TYPESAFE_KEY_ENV;
+  const openrouter = config !== undefined && config.host === DECISIONS_BACKENDS.openrouter.host;
+  if (error instanceof APIUserAbortError) return new TypeSafeIntegrationError("aborted", `${subject} request cancelled; an already submitted request may still be billed.`);
+  if (error instanceof APITimeoutError) return new TypeSafeIntegrationError("timeout", `${subject} request timed out; it was not retried and may still be billed.`);
   if (error instanceof APIError) {
-    const config = backend === undefined ? undefined : typeof backend === "string" ? backendConfig(backend) : backend;
-    const keyEnv = config?.keyEnv ?? TYPESAFE_KEY_ENV;
-    const openrouter = config !== undefined && config.host === DECISIONS_BACKENDS.openrouter.host;
     const retry = error.status === 429 ? retryAfterSeconds(error) : undefined;
     const advice = error.status === 401 ? `Check ${keyEnv}.`
       : error.status === 402 ? (openrouter ? "Insufficient credits. Add credits at https://openrouter.ai/credits." : "Check your account balance.")
@@ -46,8 +48,8 @@ export function safeError(error: unknown, backend?: BackendSpec | BackendConfig)
       : error.status === 429 ? `Check your account quota and try again later.${retry === undefined ? "" : ` Retry after ${retry} seconds.`}`
       : error.status === 400 || error.status === 422 ? "Check the question format and model limits."
       : "Try again later or check the service status.";
-    return new TypeSafeIntegrationError("http", `TypeSafe returned HTTP ${error.status}. ${advice} No automatic retry was made.`, error.status);
+    return new TypeSafeIntegrationError("http", `${subject} returned HTTP ${error.status}. ${advice} No automatic retry was made.`, error.status);
   }
-  if (error instanceof APIConnectionError) return new TypeSafeIntegrationError("connection", "Could not complete the TypeSafe connection. No automatic retry was made.");
-  return new TypeSafeIntegrationError("response", "TypeSafe returned an unreadable or unexpected response.");
+  if (error instanceof APIConnectionError) return new TypeSafeIntegrationError("connection", `Could not complete the ${subject} connection. No automatic retry was made.`);
+  return new TypeSafeIntegrationError("response", `${subject} returned an unreadable or unexpected response.`);
 }

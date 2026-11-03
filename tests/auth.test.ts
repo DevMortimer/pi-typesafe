@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { authState, authStatePath, clearAuthState, describeAuth, recordAuthFailure, recordAuthVerified } from "../src/auth.js";
-import { credentialsPath, storeApiKey } from "../src/credentials.js";
+import { AUTH_REJECTION_TTL_MS, authState, authStatePath, clearAuthState, describeAuth, isKeyRejection, recordAuthFailure, recordAuthVerified } from "../src/auth.js";
+import { clearStoredApiKey, credentialsPath, piTypesafeDir, storeApiKey } from "../src/credentials.js";
 import { TypeSafeIntegrationError } from "../src/errors.js";
 
 const workspace = mkdtempSync(join(tmpdir(), "pi-typesafe-auth-"));
@@ -27,7 +27,7 @@ test("no key at all is an error the consumer cannot mistake for a working setup"
   assert.equal(state.verified, false);
   const report = describeAuth(state);
   assert.equal(report.level, "error");
-  assert.ok(report.text.includes("every Jev judgment is skipped"));
+  assert.ok(report.text.includes("every Jev judgment will fail"));
 });
 
 test("another backend reports its own key and never the TypeSafe login hint", () => {
@@ -80,7 +80,8 @@ test("an environment key is usable but unverified until something proves it", ()
 test("a rejected key degrades loudly and a later success clears it", () => {
   storeApiKey("stored-key-0123456789abcdef");
   recordAuthVerified(new Date("2026-01-02T00:00:00.000Z"));
-  recordAuthFailure(new TypeSafeIntegrationError("http", "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", 401), new Date("2026-01-02T01:00:00.000Z"));
+  const rejectedAt = new Date(Date.now() - 60_000).toISOString();
+  recordAuthFailure(new TypeSafeIntegrationError("http", "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", 401), new Date(rejectedAt));
   const degraded = authState();
   assert.equal(degraded.kind, "stored");
   assert.equal(degraded.usable, false);
@@ -89,7 +90,7 @@ test("a rejected key degrades loudly and a later success clears it", () => {
     code: "http",
     status: 401,
     message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.",
-    at: "2026-01-02T01:00:00.000Z",
+    at: rejectedAt,
   });
   const report = describeAuth(degraded);
   assert.equal(report.level, "error");
@@ -101,6 +102,80 @@ test("a rejected key degrades loudly and a later success clears it", () => {
   assert.equal(recovered.usable, true);
   assert.equal(recovered.verified, true);
   assert.equal(recovered.lastFailure, undefined);
+});
+
+test("the rejection predicate refuses only a 401", () => {
+  assert.equal(isKeyRejection(401), true);
+  for (const status of [undefined, 400, 402, 403, 404, 429, 500]) assert.equal(isKeyRejection(status), false, `${status}`);
+});
+
+// The old tests recorded a 401 and never looked at the clock, and no test pinned a 403 to the key's fate; this table is
+// the whole cross-product, so one wrong cell fails.
+test("only a fresh 401 vetoes the key: the whole key × failure table", () => {
+  mkdirSync(piTypesafeDir(), { recursive: true, mode: 0o700 });
+  const fresh = new Date(Date.now() - 60_000).toISOString();
+  const stale = new Date(Date.now() - AUTH_REJECTION_TTL_MS - 60_000).toISOString();
+  type Row = { name: string; status?: number; at?: string; level: "ok" | "warning" | "error"; usable: boolean; verified: boolean };
+  // `verified` holds with `verifiedAt` set in every cell, so the only thing that lowers it is a fresh 401.
+  const failures: readonly Row[] = [
+    { name: "no failure", level: "ok", usable: true, verified: true },
+    { name: "401 inside the window", status: 401, at: fresh, level: "error", usable: false, verified: false },
+    { name: "401 past the window", status: 401, at: stale, level: "warning", usable: true, verified: true },
+    { name: "403 inside the window", status: 403, at: fresh, level: "ok", usable: true, verified: true },
+    { name: "403 past the window", status: 403, at: stale, level: "ok", usable: true, verified: true },
+    { name: "402 inside the window", status: 402, at: fresh, level: "ok", usable: true, verified: true },
+    { name: "429 inside the window", status: 429, at: fresh, level: "ok", usable: true, verified: true },
+  ];
+  const keys = [
+    { name: "no key", arrange: () => { delete process.env.TYPESAFE_API_KEY; clearStoredApiKey(); } },
+    { name: "environment key", arrange: () => { clearStoredApiKey(); process.env.TYPESAFE_API_KEY = "env-key-0123456789abcdef"; } },
+    { name: "stored key", arrange: () => { delete process.env.TYPESAFE_API_KEY; storeApiKey("stored-key-0123456789abcdef"); } },
+  ];
+  try {
+    for (const key of keys) for (const row of failures) {
+      key.arrange();
+      const lastFailure = row.status === undefined ? undefined : { code: "http", status: row.status, message: `TypeSafe returned HTTP ${row.status}.`, at: row.at };
+      writeFileSync(authStatePath(), JSON.stringify({ version: 1, verifiedAt: "2026-01-01T00:00:00.000Z", ...(lastFailure === undefined ? {} : { lastFailure }) }));
+      const state = authState();
+      const cell = `${key.name} × ${row.name}`;
+      assert.equal(state.usable, key.name !== "no key" && row.usable, `${cell}: usable`);
+      assert.equal(state.verified, row.verified, `${cell}: verified`);
+      assert.equal(describeAuth(state).level, key.name === "no key" ? "error" : row.level, `${cell}: level`);
+    }
+  } finally {
+    delete process.env.TYPESAFE_API_KEY;
+    clearStoredApiKey();
+  }
+  // An expired rejection is reported, not hidden: it keeps its time and names the way back.
+  process.env.TYPESAFE_API_KEY = "env-key-0123456789abcdef";
+  writeFileSync(authStatePath(), JSON.stringify({ version: 1, lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", at: stale } }));
+  try {
+    const report = describeAuth(authState());
+    assert.equal(report.level, "warning");
+    assert.ok(report.text.includes(`was rejected at ${stale}`), report.text);
+    assert.ok(report.text.includes("the next request proves the key"), report.text);
+  } finally {
+    delete process.env.TYPESAFE_API_KEY;
+  }
+});
+
+test("a rejection ends at the next success, and a 403 never becomes one", () => {
+  storeApiKey("stored-key-0123456789abcdef");
+  recordAuthFailure(new TypeSafeIntegrationError("http", "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", 401), new Date(Date.now() - 60_000));
+  const degraded = authState();
+  assert.deepEqual([degraded.usable, degraded.verified, describeAuth(degraded).level], [false, false, "error"]);
+
+  recordAuthVerified(new Date());
+  const cleared = authState();
+  assert.deepEqual([cleared.usable, cleared.verified, cleared.lastFailure], [true, true, undefined]);
+
+  recordAuthFailure(new TypeSafeIntegrationError("http", "TypeSafe returned HTTP 403. Check your account access and model permissions. No automatic retry was made.", 403), new Date());
+  const refused = authState();
+  assert.deepEqual([refused.usable, refused.verified, describeAuth(refused).level], [true, true, "ok"]);
+  assert.equal(refused.lastFailure?.status, 403);
+
+  recordAuthVerified(new Date());
+  assert.deepEqual([authState().usable, authState().lastFailure], [true, undefined]);
 });
 
 test("a non-authentication failure degrades the signal without pretending the key is gone", () => {
