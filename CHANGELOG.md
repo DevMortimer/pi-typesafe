@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0
+
 ### Added
 
 - Nace.AI is a judgment backend, `nace` on `console.nace.ai` with the key from `NACE_API_KEY` and the model `drex-v2.0`. It serves the SDK's own request and model-list paths, so the list verifies a key and `/typesafe login nace` proves one with it. Prices follow the published rates per million input tokens: `drex-v2.0` $0.060, `drex-v1.5` $0.050, `drex-max` and `drex-max-v1.1` $0.030, with each alias priced at the version that answers it. Nace declares no narrower limits, because it accepted every request shape the schema allows.
