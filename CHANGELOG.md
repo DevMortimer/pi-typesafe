@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.13.2
+
+### Fixed
+
+- A request refused with HTTP 403 no longer marks the key as rejected. `authState()` reported `usable: false` for every later call, with no expiry, after a single 403 — a status that means insufficient permissions, a guardrail block, moderation, or a provider cap, each of which belongs to one request. A 403 is still recorded in `lastFailure` and still shown, and it no longer changes `usable` or `verified`. Only an HTTP 401 rejects the key, and that rejection now expires fifteen minutes after it was recorded: `usable` returns to true, `verified` follows `verifiedAt`, and `describeAuth()` says the key was rejected at that time and that the next request proves it. A state file written by 0.13.1 heals on read, with no reset and no schema change; the stored timestamp was already there, and nothing was reading it.
+- A repeated failure refreshes the stored record every time, so a second identical 401 restarts the fifteen-minute window instead of letting the first one expire while the key still fails.
+- Request-outcome and budget messages name the backend that answered — `TypeSafe`, `OpenRouter`, `Command Code`, `Liquid AI`, `SubQ`, or a caller's endpoint label — instead of always saying TypeSafe. The abort, timeout, connection, and response messages and the session and daily cap errors change the same way.
+- `/typesafe status` and the session-start notice say that a judgment will fail instead of saying it is skipped, because nothing in this package skips one.
+
 ## 0.13.1
 
 ### Fixed
