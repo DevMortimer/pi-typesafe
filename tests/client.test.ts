@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, openUsageLedger, TypeSafeIntegrationError } from "../src/index.js";
+import { AUTH_REJECTION_TTL_MS, authStatePath } from "../src/auth.js";
+import { piTypesafeDir } from "../src/credentials.js";
 import { safeError } from "../src/errors.js";
 import { APIError } from "@typesafe-ai/sdk";
 import type { Questions, SystemOneRequest } from "../src/index.js";
@@ -217,20 +219,22 @@ test("HTTP errors are classified, never retried, and do not expose response secr
   }
 });
 
-test("HTTP advice names the backend's key, covers 402, and quotes a numeric Retry-After", async () => {
+test("HTTP advice names the backend that answered, covers 402, and quotes a numeric Retry-After", async () => {
   const savedTypesafeKey = process.env.TYPESAFE_API_KEY;
   const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
   // authState({ backend }).usable needs a key present for each backend; the client itself takes its key below.
   process.env.TYPESAFE_API_KEY = "offline-env-key-0123456789abcdef";
   process.env.OPENROUTER_API_KEY = "offline-or-key-0123456789abcdef";
   const cases = [
-    { backend: "typesafe", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made." },
-    { backend: "openrouter", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made." },
-    { backend: "typesafe", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Check your account balance. No automatic retry was made." },
-    { backend: "openrouter", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Insufficient credits. Add credits at https://openrouter.ai/credits. No automatic retry was made." },
-    { backend: "typesafe", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
-    { backend: "openrouter", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
-    { backend: "typesafe", status: 429, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 401, retryAfter: true, usable: false, message: "OpenRouter returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Check your account balance. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 402, retryAfter: true, usable: true, message: "OpenRouter returned HTTP 402. Insufficient credits. Add credits at https://openrouter.ai/credits. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 403, retryAfter: false, usable: true, message: "OpenRouter returned HTTP 403. Check your account access and model permissions. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 403, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 403. Check your account access and model permissions. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 429, retryAfter: true, usable: true, message: "OpenRouter returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 429, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. No automatic retry was made." },
   ] as const;
   try {
     for (const c of cases) {
@@ -245,16 +249,53 @@ test("HTTP advice names the backend's key, covers 402, and quotes a numeric Retr
         assert.equal(error.code, "http");
         assert.equal(error.status, c.status);
         assert.equal(error.message, c.message);
+        // The subject is the backend that answered, never a fixed TypeSafe.
+        assert.ok(error.message.startsWith(`${c.subject} returned HTTP ${c.status}.`), `${c.backend} ${c.status}`);
         assert.equal(error.message.includes("never-print-me"), false);
         return true;
       });
-      // A 401 rejects the key; a 402 is billing, so it must leave it usable (REJECTED_STATUSES stays {401, 403}).
+      // A 401 rejects the key; a 403 refuses one request and a 402 is billing, so neither touches `usable`.
       assert.equal(authState({ backend: c.backend }).usable, c.usable, `${c.backend} ${c.status}`);
     }
   } finally {
     clearAuthState();
     if (savedTypesafeKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTypesafeKey;
     if (savedOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouterKey;
+  }
+});
+
+test("budget messages name the backend that refused, not TypeSafe", async () => {
+  const ledgerPath = () => join(mkdtempSync(join(tmpdir(), "pi-typesafe-budget-")), "usage.json");
+  const session = createTypeSafe({ apiKey: "test-key", backend: "openrouter", maxRequests: 1, fetch: async () => responseFor(sample().questions) });
+  await session.evaluate(sample());
+  await assert.rejects(session.evaluate(sample()), error => error instanceof TypeSafeIntegrationError && error.message.startsWith("OpenRouter request limit reached (1 attempts per client instance)."), "session cap names OpenRouter");
+
+  const daily = createTypeSafe({
+    apiKey: "test-key",
+    backend: "openrouter",
+    maxRequestsPerDay: 1,
+    ledger: openUsageLedger({ path: ledgerPath() }),
+    fetch: async () => responseFor(sample().questions),
+  });
+  await daily.evaluate(sample());
+  await assert.rejects(daily.evaluate(sample()), error => error instanceof TypeSafeIntegrationError && error.message.startsWith("OpenRouter daily request cap reached"), "daily cap names OpenRouter");
+});
+
+test("a repeated identical 401 restarts the window instead of letting it expire", async () => {
+  clearAuthState();
+  mkdirSync(piTypesafeDir(), { recursive: true, mode: 0o700 });
+  process.env.TYPESAFE_API_KEY = "offline-env-key-0123456789abcdef";
+  try {
+    const client = createTypeSafe({ apiKey: "test-key", fetch: async () => Response.json({ error: { message: "invalid key" } }, { status: 401 }) });
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    // Time passes: the stored rejection is older than the window, and the key still fails on the next call.
+    const expired = new Date(Date.now() - AUTH_REJECTION_TTL_MS - 60_000).toISOString();
+    writeFileSync(authStatePath(), JSON.stringify({ version: 1, lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", at: expired } }));
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().usable, false, "the second refusal must restart the window");
+  } finally {
+    clearAuthState();
+    delete process.env.TYPESAFE_API_KEY;
   }
 });
 

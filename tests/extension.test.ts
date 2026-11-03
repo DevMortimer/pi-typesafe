@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Extension, RegisteredCommand, RegisteredTool } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { clearStoredApiKey, parseEvaluationRequest, storeApiKey } from "../src/index.js";
+import { authState, clearAuthState, clearStoredApiKey, parseEvaluationRequest, storeApiKey } from "../src/index.js";
 
 let temporary: string;
 let extension: Extension;
@@ -229,20 +229,20 @@ test("new sessions reset opt-in; headless opt-in is explicit", async () => {
   assert.ok(notices.at(-1)?.includes("1/20 attempts"));
 });
 
-test("an enabled session with no key announces that judgments are skipped", async () => {
+test("an enabled session with no key announces that judgments will fail", async () => {
   delete process.env.TYPESAFE_API_KEY;
   process.env.PI_TYPESAFE_ENABLED = "1";
   const handlers = extension.handlers.get("session_start") ?? [];
   const before = notices.length;
   for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
   const said = notices.slice(before).join("\n");
-  assert.ok(said.includes("judgments are skipped"));
+  assert.ok(said.includes("judgments will fail"));
   assert.ok(said.includes("TypeSafe key: missing"));
   // A key that appears later silences the next startup notice.
   process.env.TYPESAFE_API_KEY = "offline-test-key";
   const again = notices.length;
   for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "reload" }, ctx]);
-  assert.equal(notices.slice(again).some(text => text.includes("judgments are skipped")), false);
+  assert.equal(notices.slice(again).some(text => text.includes("judgments will fail")), false);
 });
 
 test("a rejected key is called out once per session and shows up in status", async () => {
@@ -258,12 +258,37 @@ test("a rejected key is called out once per session and shows up in status", asy
   } finally {
     globalThis.fetch = offlineStub;
   }
-  // Two failed calls, one callout: the reason is loud once, not once per call.
-  assert.equal(notices.slice(before).filter(text => text.includes("not authenticated")).length, 1);
+  // Two failed calls, one callout, and it describes the rejected key rather than claiming a dead session.
+  assert.equal(notices.slice(before).filter(text => text.includes("was rejected")).length, 1);
   await runCommand("status");
   assert.ok(notices.at(-1)?.includes("was rejected"));
   assert.ok(notices.at(-1)?.includes("Today "));
   assert.ok(notices.at(-1)?.includes("failed"));
+});
+
+test("a 403 is one refused request, never a dead key", async () => {
+  clearAuthState();
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  // The key was accepted before this session met the refusal.
+  await runTool();
+  const before = notices.length;
+  const offlineStub = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ error: { message: "daily cap" } }, { status: 403 });
+  try {
+    await assert.rejects(runTool(), /HTTP 403/);
+  } finally {
+    globalThis.fetch = offlineStub;
+  }
+  assert.deepEqual(notices.slice(before), [], "one refused request is not a session-level degradation");
+  const state = authState();
+  assert.equal(state.usable, true);
+  assert.equal(state.verified, true);
+  assert.equal(state.lastFailure?.status, 403);
+  await runCommand("status");
+  assert.ok(notices.at(-1)?.includes("HTTP 403"), "status still shows the refused request");
+  assert.equal(notices.at(-1)?.includes("was rejected"), false);
 });
 
 test("the registered tool admits the same near-miss aliases as the library", async () => {

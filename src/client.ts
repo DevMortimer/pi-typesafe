@@ -295,9 +295,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const ledger = options.ledger ?? openUsageLedger(callerRate === undefined ? {} : { usdPerMTok: callerRate });
   let sessionUsd = 0;
   const usage = { requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0 };
-  // Auth state writes are deduplicated: one verification record per process, one record per distinct failure.
+  // One verification record per process; every failure is written, because its time is the rejection window's anchor.
   let verificationRecorded = false;
-  let lastFailureRecorded: string | undefined;
 
   const snapshot = (): UsageSnapshot => ({ ...usage, estimatedUsd: Math.round(sessionUsd * 1e6) / 1e6 });
   const blocked = (): BlockedCap | undefined => (usage.requestsStarted >= maxRequests ? undefined : ledger.blocked(caps));
@@ -318,7 +317,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     async listModels(callOptions: EvaluationOptions = {}): Promise<string[]> {
       try {
         const models = await client.models.list(callOptions);
-        if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected model list.");
+        if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", `${backend.label} returned an unexpected model list.`);
         // A backend that serves its list publicly accepts any key, so a success there proves nothing about one.
         if (backend.modelsVerifyKey && !verificationRecorded) {
           verificationRecorded = true;
@@ -335,14 +334,14 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       const sentModel = validated.model === undefined ? model : mapModel(validated.model);
       const body = JSON.stringify({ ...validated, model: sentModel });
       assertWithinByteLimit(body, maxInputBytes);
-      if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
+      if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", `${backend.label} request cancelled before submission.`);
       if (usage.requestsStarted >= maxRequests) {
-        throw new TypeSafeIntegrationError("budget", `TypeSafe request limit reached (${maxRequests} attempts per client instance). ${capsDescription(caps)}`);
+        throw new TypeSafeIntegrationError("budget", `${backend.label} request limit reached (${maxRequests} attempts per client instance). ${capsDescription(caps)}`);
       }
       const reached = ledger.blocked(caps);
       if (reached) {
         // Name the cap, the used amount, and the day, so a long run stops loudly instead of burning tokens unnoticed.
-        throw new TypeSafeIntegrationError("budget", `TypeSafe ${CAP_LABELS[reached.cap]} reached (${reached.used} of ${reached.limit} on ${reached.day}); no request was submitted. Requests resume after the local day rolls over, or raise the cap deliberately.`);
+        throw new TypeSafeIntegrationError("budget", `${backend.label} ${CAP_LABELS[reached.cap]} reached (${reached.used} of ${reached.limit} on ${reached.day}); no request was submitted. Requests resume after the local day rolls over, or raise the cap deliberately.`);
       }
       // Snapshot before awaiting so later mutations cannot change the request or validation.
       const request = JSON.parse(body) as SystemOneRequest<Q>;
@@ -351,7 +350,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       const start = performance.now();
       try {
         const result = await client.systemOne(request, callOptions);
-        if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected answer or usage format.");
+        if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", `${backend.label} returned an unexpected answer or usage format.`);
         usage.requestsSucceeded += 1;
         // An unreported count is not a count this package can add, price, or charge against a token cap.
         const inputTokens = result.usage.input_tokens ?? 0;
@@ -372,11 +371,7 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         // The request was submitted, so it counts even when it fails; the reason stays visible in `authState()`.
         usage.requestsFailed += 1;
         ledger.recordFailure();
-        const fingerprint = `${safe.code}:${safe.status ?? ""}:${safe.message}`;
-        if (lastFailureRecorded !== fingerprint) {
-          lastFailureRecorded = fingerprint;
-          recordAuthFailure(safe);
-        }
+        recordAuthFailure(safe);
         throw safe;
       }
     },

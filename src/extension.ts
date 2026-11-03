@@ -6,7 +6,7 @@ import { BACKEND_ENV, DEFAULT_BACKEND, DECISIONS_BACKENDS, MODEL_ENV, backendFro
 import type { BackendSpec, TypeSafeBackend } from "./backends.js";
 import { createTypeSafe, DEFAULT_MAX_REQUESTS } from "./client.js";
 import type { Evaluation, TypeSafe } from "./client.js";
-import { authState, clearAuthState, describeAuth } from "./auth.js";
+import { authState, clearAuthState, describeAuth, isKeyRejection } from "./auth.js";
 import { clearStoredApiKey, credentialsPath, keySituation, keySourceLabel } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
 import { loginWithPrompt } from "./login.js";
@@ -100,8 +100,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     // unverified-but-present key stays quiet, because the first request is what proves it.
     const auth = describeAuth(authState({ backend }));
     // A backend name the registry does not know means no judgment can be sent at all, whether or not it is enabled.
-    if (backendError !== undefined) callOut(ctx, `start:backend`, `${backendError} Judgments are skipped until ${BACKEND_ENV} names a valid backend or is unset.`);
-    else if (enabled && auth.level === "error") callOut(ctx, `start:${auth.level}`, `TypeSafe is enabled but judgments are skipped. ${auth.text}`);
+    if (backendError !== undefined) callOut(ctx, `start:backend`, `${backendError} Judgments will fail until ${BACKEND_ENV} names a valid backend or is unset.`);
+    else if (enabled && auth.level === "error") callOut(ctx, `start:${auth.level}`, `TypeSafe is enabled but judgments will fail. ${auth.text}`);
   });
 
   pi.registerEntryRenderer<Evaluation<Questions>>("typesafe-result", (entry, { expanded }) => new Text(entry.data ? format(entry.data, expanded) : "TypeSafe · no result", 0, 0));
@@ -132,11 +132,14 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         const result = await getClient().evaluate(request, signal ? { signal } : {});
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
       } catch (error) {
-        const safe = safeError(error);
-        // Authentication degradation is louder than a single failed call: it means every later judgment is skipped.
-        const rejected = safe.code === "http" && (safe.status === 401 || safe.status === 403);
-        if (rejected || safe.code === "configuration") {
-          callOut(ctx, `run:${safe.code}:${safe.status ?? ""}`, `TypeSafe is not authenticated (${safe.message}) Judgments will fail until the key is fixed.`);
+        const safe = safeError(error, backend);
+        // A 401 is about the key, so it outlives this call and is called out once; a 403 refuses one request and is
+        // only thrown. The client recorded the failure before throwing, so describeAuth describes that failure.
+        if (isKeyRejection(safe.status)) {
+          const auth = describeAuth(authState({ backend }));
+          callOut(ctx, `run:${safe.code}:${safe.status ?? ""}`, `${auth.text} Judgments will fail until the key is fixed.`);
+        } else if (safe.code === "configuration") {
+          callOut(ctx, `run:configuration`, `${safe.message} Judgments will fail until that is fixed.`);
         }
         throw safe;
       }
@@ -200,7 +203,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           // one that names none, otherwise by the consent sentence itself. An unusable name sends nothing, so that
           // status names no model and quotes no consent.
           const route = backendError !== undefined
-            ? `Backend: ${BACKEND_ENV} is invalid — ${backendError} Judgments are skipped.`
+            ? `Backend: ${BACKEND_ENV} is invalid — ${backendError} Judgments will fail.`
             : backendLine(backend);
           const version = backendError === undefined && !consent.namesModel ? `Model: ${sentModelId(backend, model)}.` : "";
           report([
@@ -287,7 +290,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         // Playground results stay out of LLM context; the agent tool returns its own results normally.
         pi.appendEntry("typesafe-result", result);
       } catch (error) {
-        report(safeError(error).message, "error");
+        report(safeError(error, backend).message, "error");
       }
     },
   });

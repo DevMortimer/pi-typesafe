@@ -379,8 +379,8 @@ test("a malformed reply on an endpoint is a response error", async () => {
 // 7. 401 advice names each backend's own key variable.
 
 test("401 advice names each backend's own key variable", () => {
-  assert.equal(safeError(new APIError(401, undefined, new Headers()), "commandcode").message, "TypeSafe returned HTTP 401. Check COMMANDCODE_API_KEY. No automatic retry was made.");
-  assert.equal(safeError(new APIError(401, undefined, new Headers()), gateway).message, "TypeSafe returned HTTP 401. Check GATEWAY_JEV_KEY. No automatic retry was made.");
+  assert.equal(safeError(new APIError(401, undefined, new Headers()), "commandcode").message, "Command Code returned HTTP 401. Check COMMANDCODE_API_KEY. No automatic retry was made.");
+  assert.equal(safeError(new APIError(401, undefined, new Headers()), gateway).message, "Gateway returned HTTP 401. Check GATEWAY_JEV_KEY. No automatic retry was made.");
 });
 
 // 8. resolveBackend and backendHost.

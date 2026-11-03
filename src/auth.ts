@@ -11,8 +11,20 @@ const AUTH_VERSION = 1;
 const CODES: ReadonlySet<string> = new Set<IntegrationErrorCode>([
   "configuration", "validation", "budget", "aborted", "timeout", "http", "connection", "response",
 ]);
-/** Statuses that mean the key itself was refused, not that the service was busy. */
-const REJECTED_STATUSES = new Set([401, 403]);
+/**
+ * How long a stored 401 vetoes the key. The next request proves the key again once the window passes, so one refusal
+ * cannot disable judgments for good. Fifteen minutes is a policy choice, not a measured provider constant.
+ */
+export const AUTH_REJECTION_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Only HTTP 401 refuses the key itself. A 403 refuses one request — insufficient permissions, a guardrail block, a
+ * moderation flag, or a provider cap — so it never vetoes the key. OpenRouter's error page, checked 2026-11-03, gives
+ * 401 invalid credentials, 402 insufficient credits, and 403 forbidden.
+ */
+export function isKeyRejection(status: number | undefined): boolean {
+  return status === 401;
+}
 
 /** The last request that degraded TypeSafe, with no upstream body, header, key, or submitted state. */
 export interface AuthFailure {
@@ -20,6 +32,17 @@ export interface AuthFailure {
   readonly status?: number;
   readonly message: string;
   readonly at: string;
+}
+
+type Rejection = "none" | "fresh" | "expired";
+
+/** `fresh` still vetoes the key, `expired` is only a record of what was refused when: no schema change, no manual reset. */
+function rejectionOf(failure: AuthFailure | undefined): Rejection {
+  if (failure === undefined || failure.code !== "http" || !isKeyRejection(failure.status)) return "none";
+  const at = Date.parse(failure.at);
+  // A timestamp this code cannot read cannot prove the rejection is current, so it counts as spent.
+  if (!Number.isFinite(at)) return "expired";
+  return Date.now() - at < AUTH_REJECTION_TTL_MS ? "fresh" : "expired";
 }
 
 /**
@@ -41,14 +64,17 @@ export interface AuthState {
   readonly keyName: string;
   /**
    * True when the key in effect was accepted by the backend (a login proves the backend it was asked for; a successful
-   * request proves any key). The record is shared across backends: switching backends keeps the last outcome until the
-   * next request.
+   * request proves any key). A 401 rejection younger than `AUTH_REJECTION_TTL_MS` clears it; a 403 never does. The
+   * record is shared across backends: switching backends keeps the last outcome until the next request.
    */
   readonly verified: boolean;
   readonly verifiedAt?: string;
   /** The last failure, cleared by the next successful request. */
   readonly lastFailure?: AuthFailure;
-  /** A key is present and the last authentication outcome was not a rejection. False means judgments are skipped. */
+  /**
+   * A key is present and no 401 rejection younger than `AUTH_REJECTION_TTL_MS` stands against it. A 403 never makes it
+   * false, because it refuses one request, not the key. False means judgments will fail.
+   */
   readonly usable: boolean;
 }
 
@@ -101,7 +127,7 @@ export function authState(options: { path?: string; backend?: BackendSpec } = {}
   const situation = keySituation(backend);
   const stored = readState(path);
   const source: KeySource | undefined = situation.kind === "environment" ? "environment" : situation.kind === "stored" ? "stored" : undefined;
-  const rejected = stored.lastFailure?.code === "http" && stored.lastFailure.status !== undefined && REJECTED_STATUSES.has(stored.lastFailure.status);
+  const rejected = rejectionOf(stored.lastFailure) === "fresh";
   const usable = source !== undefined && !rejected;
   return {
     backend,
@@ -140,7 +166,10 @@ export function clearAuthState(): void {
 }
 
 export interface AuthReport {
-  /** `error` when judgments are skipped or were rejected, `warning` when the key is unverified, otherwise `ok`. */
+  /**
+   * `error` when judgments will fail or the key was rejected, `warning` when the key is unverified or its rejection has
+   * expired, otherwise `ok`.
+   */
   readonly level: "ok" | "warning" | "error";
   /** One line naming the key source and, when degraded, the reason. Safe to display. */
   readonly text: string;
@@ -156,14 +185,18 @@ export function describeAuth(state: AuthState = authState()): AuthReport {
   const since = state.lastFailure ? ` Last failure: ${state.lastFailure.message}${state.lastFailure.at ? ` (${state.lastFailure.at})` : ""}` : "";
   if (state.kind === "missing") {
     const how = `a key is configured (/typesafe login${config.name && config.name !== DEFAULT_BACKEND ? ` ${config.name}` : ""} or ${config.keyEnv})`;
-    return { level: "error", text: `${label}: missing — every Jev judgment is skipped until ${how}.${since}` };
+    return { level: "error", text: `${label}: missing — every Jev judgment will fail until ${how}.${since}` };
   }
   if (state.kind === "unusable") {
-    return { level: "error", text: `${label}: unusable (${state.reason ?? "unknown reason"}) — judgments are skipped until the key is fixed.${since}` };
+    return { level: "error", text: `${label}: unusable (${state.reason ?? "unknown reason"}) — judgments will fail until the key is fixed.${since}` };
   }
-  const rejected = state.lastFailure?.code === "http" && state.lastFailure.status !== undefined && REJECTED_STATUSES.has(state.lastFailure.status);
-  if (rejected) {
+  const rejection = rejectionOf(state.lastFailure);
+  if (rejection === "fresh") {
     return { level: "error", text: `${label}: ${state.keyName} was rejected.${since}` };
+  }
+  if (rejection === "expired") {
+    const at = state.lastFailure?.at;
+    return { level: "warning", text: `${label}: ${state.keyName} was rejected${at === undefined ? "" : ` at ${at}`}; that rejection expired, so the next request proves the key.` };
   }
   if (!state.verified) {
     return { level: "warning", text: `${label}: ${state.keyName} (not verified yet — the first request proves it).${since}` };
