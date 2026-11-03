@@ -2,10 +2,10 @@ import { TypeSafeIntegrationError } from "./errors.js";
 import { DEFAULT_BACKEND_LIMITS } from "./schema.js";
 import type { BackendLimits } from "./schema.js";
 
-export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid" | "subq";
+export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid" | "subq" | "nace";
 
 export interface BackendConfig {
-  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI", "SubQ". */
+  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI", "SubQ", "Nace.AI". */
   label: string;
   host: string;
   /** The environment variable that carries this backend's key. Absent means the TypeSafe key resolution applies. */
@@ -105,6 +105,14 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     limits: { maxQuestions: 16, minChoiceOptions: 2, maxScoreLevels: 10 },
     prices: { "subq-snap-preview": 0.05 },
   },
+  nace: {
+    label: "Nace.AI",
+    host: "https://console.nace.ai",
+    keyEnv: "NACE_API_KEY",
+    // No limits: measured on 2026-11-04, Nace accepted 1 option, 2 and 33 score levels, 64 options, and 64 questions.
+    // An alias or retired id is billed at the version that answers it; `drex-max-finance` has no published price, so it falls back to the default estimate.
+    prices: { "drex-v2.0": 0.06, "drex-v1.5": 0.05, "drex-max": 0.03, "drex-max-v1.1": 0.03, "drex-latest": 0.06, "nacedm-latest": 0.06, "drex-v1.0": 0.03, "drex-v1.1": 0.05 },
+  },
 };
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
@@ -148,6 +156,7 @@ const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
   commandcode: "typesafe/jev",
   liquid: "d1:free",
   subq: "subq-snap-preview",
+  nace: "drex-v2.0",
 };
 
 /**
