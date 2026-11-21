@@ -3,7 +3,9 @@ import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { AUTH_REJECTION_TTL_MS, authState, authStatePath, clearAuthState, describeAuth, isKeyRejection, recordAuthFailure, recordAuthVerified } from "../src/auth.js";
+import { AUTH_REJECTION_TTL_MS, authState, authStatePath, clearAuthState, describeAuth, isKeyRejection, recordAuthFailure, recordAuthVerified, transitionAuthRecord } from "../src/auth.js";
+import type { AuthStatus } from "../src/auth.js";
+import type { BackendEndpoint } from "../src/backends.js";
 import { clearStoredApiKey, credentialsPath, piTypesafeDir, storeApiKey } from "../src/credentials.js";
 import { TypeSafeIntegrationError } from "../src/errors.js";
 
@@ -213,4 +215,129 @@ test("a corrupt auth record is ignored and clearing forgets both facts", () => {
   const cleared = authState();
   assert.equal(cleared.verified, false);
   assert.equal(cleared.lastFailure, undefined);
+});
+
+test("per-backend auth records isolate 401 rejections and selective clearing", () => {
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  const savedCustom = process.env.CUSTOM_GATEWAY_KEY;
+  process.env.TYPESAFE_API_KEY = "env-ts-key-0123456789abcdef";
+  process.env.OPENROUTER_API_KEY = "env-or-key-0123456789abcdef";
+  process.env.CUSTOM_GATEWAY_KEY = "env-gw-key-0123456789abcdef";
+  const endpoint: BackendEndpoint = {
+    label: "Gateway",
+    host: "https://gw.example.com",
+    path: "/v1/decisions",
+    keyEnv: "CUSTOM_GATEWAY_KEY",
+    defaultModel: "jev-latest",
+  };
+  clearAuthState();
+  try {
+    recordAuthVerified(new Date("2026-01-05T00:00:00.000Z"), { backend: "typesafe" });
+    recordAuthVerified(new Date("2026-01-05T00:00:00.000Z"), { backend: endpoint });
+    recordAuthFailure(
+      new TypeSafeIntegrationError("http", "OpenRouter returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made.", 401),
+      new Date(Date.now() - 60_000),
+      { backend: "openrouter" },
+    );
+
+    const ts = authState({ backend: "typesafe" });
+    assert.equal(ts.status, "verified");
+    assert.equal(ts.usable, true);
+    assert.equal(ts.verified, true);
+    assert.equal(ts.lastFailure, undefined);
+    assert.equal(describeAuth(ts).level, "ok");
+
+    const or = authState({ backend: "openrouter" });
+    assert.equal(or.status, "rejected");
+    assert.equal(or.usable, false);
+    assert.equal(or.verified, false);
+    assert.equal(describeAuth(or).level, "error");
+
+    // Clearing one backend preserves the others, including endpoints carrying a custom request `path`.
+    clearAuthState("openrouter");
+    assert.equal(authState({ backend: "openrouter" }).status, "unverified");
+    assert.equal(authState({ backend: "openrouter" }).lastFailure, undefined);
+    assert.equal(authState({ backend: "typesafe" }).status, "verified");
+    assert.equal(authState({ backend: endpoint }).status, "verified");
+
+    clearAuthState(endpoint);
+    assert.equal(authState({ backend: endpoint }).status, "unverified");
+    assert.equal(authState({ backend: "typesafe" }).status, "verified");
+
+    clearAuthState();
+    assert.equal(authState({ backend: "typesafe" }).status, "unverified");
+  } finally {
+    clearAuthState();
+    delete process.env.TYPESAFE_API_KEY;
+    if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+    if (savedCustom === undefined) delete process.env.CUSTOM_GATEWAY_KEY; else process.env.CUSTOM_GATEWAY_KEY = savedCustom;
+  }
+});
+
+test("legacy top-level auth-state.json heals on read for typesafe without leaking to other backends", () => {
+  const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+  process.env.TYPESAFE_API_KEY = "env-ts-key-0123456789abcdef";
+  process.env.OPENROUTER_API_KEY = "env-or-key-0123456789abcdef";
+  mkdirSync(piTypesafeDir(), { recursive: true, mode: 0o700 });
+  const fresh = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(authStatePath(), JSON.stringify({
+    version: 1,
+    verifiedAt: "2026-01-01T00:00:00.000Z",
+    lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", at: fresh },
+  }));
+  try {
+    const ts = authState({ backend: "typesafe" });
+    assert.equal(ts.status, "rejected");
+    assert.equal(ts.usable, false);
+    const or = authState({ backend: "openrouter" });
+    assert.equal(or.status, "unverified");
+    assert.equal(or.usable, true);
+    assert.equal(or.lastFailure, undefined);
+
+    // Next write to another backend migrates legacy typesafe into `backends.typesafe` without dropping it.
+    recordAuthVerified(new Date("2026-01-06T00:00:00.000Z"), { backend: "openrouter" });
+    assert.equal(authState({ backend: "openrouter" }).status, "verified");
+    assert.equal(authState({ backend: "typesafe" }).status, "rejected");
+  } finally {
+    clearAuthState();
+    delete process.env.TYPESAFE_API_KEY;
+    if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+  }
+});
+
+test("transitionAuthRecord and AuthStatus cover every auth breaker state and transition", () => {
+  const failure = { code: "http" as const, status: 401, message: "HTTP 401", at: "2026-01-02T00:00:00.000Z" };
+  const verified = transitionAuthRecord({}, { type: "verified", at: "2026-01-01T00:00:00.000Z" });
+  assert.deepEqual(verified, { verifiedAt: "2026-01-01T00:00:00.000Z" });
+  const failed = transitionAuthRecord(verified, { type: "failed", failure });
+  assert.deepEqual(failed, { verifiedAt: "2026-01-01T00:00:00.000Z", lastFailure: failure });
+  const recovered = transitionAuthRecord(failed, { type: "verified", at: "2026-01-03T00:00:00.000Z" });
+  assert.deepEqual(recovered, { verifiedAt: "2026-01-03T00:00:00.000Z" });
+  assert.deepEqual(transitionAuthRecord(failed, { type: "cleared" }), {});
+
+  // Exhaustively exercise all 6 AuthStatus variants through authState + describeAuth.
+  const fresh = new Date(Date.now() - 60_000).toISOString();
+  const stale = new Date(Date.now() - AUTH_REJECTION_TTL_MS - 60_000).toISOString();
+  const cases: ReadonlyArray<{ status: AuthStatus; level: "ok" | "warning" | "error"; usable: boolean; arrange: () => void }> = [
+    { status: "missing", level: "error", usable: false, arrange: () => { delete process.env.TYPESAFE_API_KEY; clearStoredApiKey(); clearAuthState(); } },
+    { status: "unusable", level: "error", usable: false, arrange: () => { delete process.env.TYPESAFE_API_KEY; writeFileSync(credentialsPath(), JSON.stringify({ apiKey: "stored-key-0123456789abcdef" }), { mode: 0o600 }); chmodSync(credentialsPath(), 0o644); clearAuthState(); } },
+    { status: "unverified", level: "warning", usable: true, arrange: () => { chmodSync(credentialsPath(), 0o600); clearStoredApiKey(); process.env.TYPESAFE_API_KEY = "env-key-0123456789abcdef"; clearAuthState(); } },
+    { status: "verified", level: "ok", usable: true, arrange: () => { recordAuthVerified(new Date("2026-01-01T00:00:00.000Z")); } },
+    { status: "rejected", level: "error", usable: false, arrange: () => { recordAuthFailure(new TypeSafeIntegrationError("http", "HTTP 401", 401), new Date(fresh)); } },
+    { status: "rejection_expired", level: "warning", usable: true, arrange: () => { recordAuthFailure(new TypeSafeIntegrationError("http", "HTTP 401", 401), new Date(stale)); } },
+  ];
+  try {
+    for (const c of cases) {
+      c.arrange();
+      const state = authState();
+      assert.equal(state.status, c.status);
+      assert.equal(state.usable, c.usable);
+      assert.equal(describeAuth(state).level, c.level);
+    }
+  } finally {
+    try { chmodSync(credentialsPath(), 0o600); } catch { /* may not exist */ }
+    clearStoredApiKey();
+    clearAuthState();
+    delete process.env.TYPESAFE_API_KEY;
+  }
 });

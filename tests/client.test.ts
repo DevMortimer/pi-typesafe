@@ -567,3 +567,131 @@ test("key resolution picks the right env var per backend", () => {
     if (originalOR === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = originalOR;
   }
 });
+
+test("per-backend client failures do not contaminate another backend's auth state", async () => {
+  const savedTs = process.env.TYPESAFE_API_KEY;
+  const savedOr = process.env.OPENROUTER_API_KEY;
+  process.env.TYPESAFE_API_KEY = "ts-test-key-1234567890123456";
+  process.env.OPENROUTER_API_KEY = "or-test-key-1234567890123456";
+  clearAuthState();
+  try {
+    const tsClient = createTypeSafe({ backend: "typesafe", fetch: async () => responseFor(sample().questions) });
+    await tsClient.evaluate(sample());
+    assert.equal(authState({ backend: "typesafe" }).status, "verified");
+
+    const orClient = createTypeSafe({ backend: "openrouter", fetch: async () => Response.json({ error: "bad key" }, { status: 401 }) });
+    await assert.rejects(orClient.evaluate(sample()), hasCode("http"));
+
+    const orState = authState({ backend: "openrouter" });
+    assert.equal(orState.status, "rejected");
+    assert.equal(orState.usable, false);
+
+    const tsState = authState({ backend: "typesafe" });
+    assert.equal(tsState.status, "verified");
+    assert.equal(tsState.usable, true);
+    assert.equal(tsState.verified, true);
+    assert.equal(tsState.lastFailure, undefined);
+  } finally {
+    clearAuthState();
+    if (savedTs === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTs;
+    if (savedOr === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOr;
+  }
+});
+
+test("a single client instance recovers auth state on 200 -> 401 -> 200 and via key-verifying listModels", async () => {
+  const savedTs = process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_API_KEY = "ts-test-key-1234567890123456";
+  clearAuthState();
+  try {
+    let mode: "ok" | "reject" = "ok";
+    const client = createTypeSafe({
+      backend: "typesafe",
+      fetch: async (url) => {
+        if (String(url).endsWith("/models")) return Response.json({ models: [{ name: "jev-latest" }] });
+        if (mode === "reject") return Response.json({ error: "bad key" }, { status: 401 });
+        return responseFor(sample().questions);
+      },
+    });
+
+    await client.evaluate(sample());
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().lastFailure, undefined);
+
+    mode = "reject";
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().status, "rejected");
+    assert.equal(authState().usable, false);
+    assert.equal(authState().lastFailure?.status, 401);
+
+    mode = "ok";
+    await client.evaluate(sample());
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().usable, true);
+    assert.equal(authState().verified, true);
+    assert.equal(authState().lastFailure, undefined);
+
+    // Same recovery via a key-verifying listModels() after a degradation on the same client.
+    mode = "reject";
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().status, "rejected");
+    await client.listModels();
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().lastFailure, undefined);
+  } finally {
+    clearAuthState();
+    if (savedTs === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTs;
+  }
+});
+
+test("getSpend reports explicit BudgetState and never masks a reached daily cap", async () => {
+  const freshLedger = () => openUsageLedger({ path: join(mkdtempSync(join(tmpdir(), "pi-typesafe-budget-state-")), "usage.json") });
+
+  // Session cap only: within_budget -> session_cap_reached
+  const sessionOnly = createTypeSafe({ apiKey: "test-key", maxRequests: 1, ledger: freshLedger(), fetch: async () => responseFor(sample().questions) });
+  assert.deepEqual(sessionOnly.getSpend().budget, { status: "within_budget", remainingRequests: 1 });
+  assert.equal(sessionOnly.getSpend().blocked, undefined);
+  await sessionOnly.evaluate(sample());
+  assert.deepEqual(sessionOnly.getSpend().budget, { status: "session_cap_reached", used: 1, limit: 1 });
+  assert.equal(sessionOnly.getSpend().blocked, undefined);
+
+  // Both session cap and daily cap reached: daily blocked is NOT masked and budget reports daily_cap_reached.
+  const both = createTypeSafe({ apiKey: "test-key", maxRequests: 1, maxRequestsPerDay: 1, ledger: freshLedger(), fetch: async () => responseFor(sample().questions) });
+  await both.evaluate(sample());
+  const spend = both.getSpend();
+  assert.equal(spend.blocked?.cap, "requestsPerDay");
+  assert.equal(spend.blocked?.used, 1);
+  assert.equal(spend.blocked?.limit, 1);
+  assert.deepEqual(spend.budget, { status: "daily_cap_reached", blocked: spend.blocked });
+});
+
+test("attempt accounting preserves requestsStarted === requestsSucceeded + requestsFailed across outcomes", async () => {
+  const ledger = openUsageLedger({ path: join(mkdtempSync(join(tmpdir(), "pi-typesafe-attempt-")), "usage.json") });
+  let step = 0;
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    ledger,
+    fetch: async () => {
+      step += 1;
+      if (step === 1) return responseFor(sample().questions);
+      if (step === 2) return Response.json({ error: "fail" }, { status: 500 });
+      return Response.json({ malformed: true });
+    },
+  });
+  await client.evaluate(sample());
+  await assert.rejects(client.evaluate(sample()), hasCode("http"));
+  await assert.rejects(client.evaluate(sample()), hasCode("response"));
+  // Pre-submission failures never start an attempt.
+  await assert.rejects(client.evaluate(sample(), { signal: AbortSignal.abort() }), hasCode("aborted"));
+
+  const usage = client.getUsage();
+  assert.equal(usage.requestsStarted, 3);
+  assert.equal(usage.requestsSucceeded, 1);
+  assert.equal(usage.requestsFailed, 2);
+  assert.equal(usage.requestsStarted, usage.requestsSucceeded + usage.requestsFailed);
+
+  const today = client.getSpend().today;
+  assert.equal(today.requestsStarted, 3);
+  assert.equal(today.requestsSucceeded, 1);
+  assert.equal(today.requestsFailed, 2);
+  assert.equal(today.requestsStarted, today.requestsSucceeded + today.requestsFailed);
+});

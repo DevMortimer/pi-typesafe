@@ -179,36 +179,95 @@ function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Single attempt to acquire the exclusive lock file. */
+export type LockProbe =
+  | { readonly status: "acquired"; readonly release: () => void }
+  | { readonly status: "contended_stale" }
+  | { readonly status: "contended_active" }
+  | { readonly status: "unavailable" };
+
+/** Final result of waiting up to LOCK_WAIT_MS for the ledger lock. */
+export type LockOutcome =
+  | { readonly status: "acquired"; readonly release: () => void }
+  | { readonly status: "timed_out" }
+  | { readonly status: "unavailable" };
+
+/** In-process delta buffer state keyed by local day so held-back deltas survive contention and midnight rollover. */
+export type DeltaBufferState =
+  | { readonly status: "synced" }
+  | { readonly status: "buffered"; readonly pending: Readonly<Record<string, DayRecord>> };
+
+export type DeltaBufferEvent =
+  | { readonly type: "record"; readonly day: string; readonly delta: DayRecord }
+  | { readonly type: "flushed" };
+
+/** Single-writer transition helper for the in-process usage delta buffer. */
+export function transitionDeltaBuffer(state: DeltaBufferState, event: DeltaBufferEvent): DeltaBufferState {
+  switch (event.type) {
+    case "record": {
+      const base = state.status === "buffered" ? state.pending : {};
+      const existing = base[event.day] ?? emptyTotals();
+      return {
+        status: "buffered",
+        pending: { ...base, [event.day]: addDay(existing, event.delta) },
+      };
+    }
+    case "flushed":
+      return { status: "synced" };
+  }
+}
+
+/** One non-blocking probe of the lock file; unlinks a lock older than LOCK_STALE_MS before signaling retry. */
+export function probeLock(lock: string, nowMs: number): LockProbe {
+  try {
+    closeSync(openSync(lock, "wx", 0o600));
+    return { status: "acquired", release: () => { try { unlinkSync(lock); } catch { /* already gone */ } } };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { status: "unavailable" };
+  }
+  try {
+    if (nowMs - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+      try {
+        unlinkSync(lock);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { status: "unavailable" };
+      }
+      return { status: "contended_stale" };
+    }
+  } catch (error) {
+    // The holder released it, or another process took it over, between our open and our stat.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { status: "unavailable" };
+    return { status: "contended_stale" };
+  }
+  return { status: "contended_active" };
+}
+
 /**
  * Take the lock file next to the ledger, created exclusively. Waits at most LOCK_WAIT_MS; a lock older than
- * LOCK_STALE_MS is taken over. Returns the release function, or undefined when the lock could not be taken.
+ * LOCK_STALE_MS is taken over.
  */
-function takeLock(lock: string): (() => void) | undefined {
+export function takeLock(lock: string): LockOutcome {
   const deadline = Date.now() + LOCK_WAIT_MS;
   try {
     mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
-    for (;;) {
-      try {
-        closeSync(openSync(lock, "wx", 0o600));
-        return () => { try { unlinkSync(lock); } catch { /* already gone */ } };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return undefined;
-      }
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(lock);
-          continue;
-        }
-      } catch (error) {
-        // The holder released it, or another process took it over, between our open and our stat.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
-        continue;
-      }
-      if (Date.now() >= deadline) return undefined;
-      pause(LOCK_RETRY_MS);
-    }
   } catch {
-    return undefined;
+    return { status: "unavailable" };
+  }
+  for (;;) {
+    const probe = probeLock(lock, Date.now());
+    switch (probe.status) {
+      case "acquired":
+      case "unavailable":
+        return probe;
+      case "contended_stale":
+        // Stale or just-released lock: retry without sleeping, still bounded by deadline.
+        if (Date.now() >= deadline) return { status: "timed_out" };
+        continue;
+      case "contended_active":
+        if (Date.now() >= deadline) return { status: "timed_out" };
+        pause(LOCK_RETRY_MS);
+        continue;
+    }
   }
 }
 
@@ -284,8 +343,7 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
   const lock = `${path}.lock`;
   const now = options.now ?? (() => new Date());
   const usdPerMTok = options.usdPerMTok !== undefined && Number.isFinite(options.usdPerMTok) && options.usdPerMTok >= 0 ? options.usdPerMTok : DEFAULT_USD_PER_MTOK;
-  /** Deltas this process has recorded and the file does not hold yet, by day. */
-  let pending: Record<string, DayRecord> = {};
+  let buffer: DeltaBufferState = { status: "synced" };
 
   /** Recorded costs plus an estimate for the input tokens that have none. */
   const costOf = (value: DayRecord): number =>
@@ -305,27 +363,30 @@ export function openUsageLedger(options: UsageLedgerOptions = {}): UsageLedger {
   const current = (): { day: string; totals: DayRecord } => {
     const day = localDay(now());
     const stored = readDays(path)?.[day] ?? emptyTotals();
-    return { day, totals: pending[day] === undefined ? stored : addDay(stored, pending[day] as DayRecord) };
+    const pendingDay = buffer.status === "buffered" ? buffer.pending[day] : undefined;
+    return { day, totals: pendingDay === undefined ? stored : addDay(stored, pendingDay) };
   };
 
   const flush = (): void => {
-    const owed = Object.entries(pending);
-    if (owed.length === 0) return;
-    const release = takeLock(lock);
-    if (!release) return;
+    if (buffer.status === "synced") return;
+    const owed = Object.entries(buffer.pending);
+    const outcome = takeLock(lock);
+    if (outcome.status !== "acquired") return;
     try {
       const stored = readDays(path);
       if (!stored) return;
       for (const [name, delta] of owed) stored[name] = addDay(stored[name] ?? emptyTotals(), delta);
-      if (writeDays(path, keepRecent(stored, localDay(now())))) pending = {};
+      if (writeDays(path, keepRecent(stored, localDay(now())))) {
+        buffer = transitionDeltaBuffer(buffer, { type: "flushed" });
+      }
     } finally {
-      release();
+      outcome.release();
     }
   };
 
   const add = (delta: Partial<UsageTotals> & { costUsd?: number; costedInputTokens?: number }) => {
     const day = localDay(now());
-    pending[day] = addDay(pending[day] ?? emptyTotals(), { ...emptyTotals(), ...delta });
+    buffer = transitionDeltaBuffer(buffer, { type: "record", day, delta: { ...emptyTotals(), ...delta } });
     flush();
   };
 
