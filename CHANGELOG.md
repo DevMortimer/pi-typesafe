@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.15.0
+
+### Added
+
+- Explicit discriminated-union state machines across auth, budgets, error handling, batching, calibration, admission, login, and the Pi extension:
+  - `AuthStatus` (`missing`, `unusable`, `rejected`, `rejection_expired`, `unverified`, `verified`) on `AuthState.status` and pure `transitionAuthRecord(record, event)`, with optional backend and path targeting on `recordAuthVerified`, `recordAuthFailure`, and `clearAuthState`.
+  - `BudgetState` (`within_budget`, `session_cap_reached`, `daily_cap_reached`) on `SpendReport.budget`.
+  - `ErrorDisposition` (`transient` with optional `retryAfterSeconds` vs `permanent` with remediation `target`), pure `classifyError(error)` supporting `TypeSafeIntegrationError`, SDK errors, failed `AskAnswer` envelopes, and unknown throwables, plus non-enumerable `disposition` and `retryable` getters on `TypeSafeIntegrationError.prototype` that keep `JSON.stringify` and deep-equality shapes unchanged.
+  - 3-variant `Settled<T>` discriminated on `status` (`"succeeded" | "failed" | "skipped"`, with `skipReason: "aborted" | "stopped"` on skipped items), 3-variant `ReplayResult<T>` discriminated on `status` (`"scored" | "failed" | "skipped"`), `ThresholdSelection` modes (`best_f1` vs `floors`) in `pickThreshold`, `ADMISSION_STAGES` / `AdmissionStage`, and interactive login/prompt state types on `pi-typesafe/ui`.
+
+### Changed
+
+- `auth-state.json` now stores verification and failure records per backend under `backends[credentialId(backend)]` (`version: 1`) so an HTTP 401 or `clearAuthState(backend)` on one backend never affects another. Existing pre-0.15 top-level `{ verifiedAt, lastFailure }` files heal on read into `typesafe` and migrate on the next write.
+- `prepareEvaluationRequest` and `parseEvaluationRequest` run through one ordered `ADMISSION_STAGES` reducer, keeping every existing validation rule and message unchanged.
+
+### Fixed
+
+- When `PI_TYPESAFE_BACKEND` names an invalid backend, `/typesafe enable`, `/typesafe setup`, `/typesafe test`, and `/typesafe playground` now decline with a warning naming `PI_TYPESAFE_BACKEND` instead of falling back to `api.typesafe.ai`.
+- A client instance that succeeded, failed with HTTP 401, and later succeeded again now clears `lastFailure` and restores `verified` in `auth-state.json`; previously a one-way flag suppressed `recordAuthVerified` after the first success.
+- Session degradation callouts re-arm after recovery (a successful evaluation or active `/typesafe login`), so a second key rejection later in the same session is reported instead of suppressed; `/typesafe status` and `/typesafe setup` also surface exhausted per-session attempt caps (`20/20`).
+- Candidate-key judge probes during `/typesafe login` on backends with public model lists (`openrouter`, `commandcode`, `subq`) run against an isolated in-memory ledger and restore `auth-state.json` on failure, so a mistyped or rejected key never writes `usage.json`, trips daily caps, or marks an active backend rejected; `KeyPrompt` settles at most once on trailing input.
+- Reaching `maxRequests` no longer masks a reached daily cap in `getSpend().blocked`.
+- `fanOut` records the first pool stop transition so a late `AbortSignal` abort during drain cannot overwrite a prior `budget` stop, stamps unstarted items after a budget stop with `code: "budget"`, and `replay` turns non-finite scorer outputs (`NaN`, `Infinity`) into `status: "failed"` at the replay boundary.
+
 ## 0.14.0
 
 ### Added
