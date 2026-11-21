@@ -71,7 +71,7 @@ Every backend takes its key from its own environment variable first, then from t
 
 ## Admission
 
-`prepareEvaluationRequest(value, { maxInputBytes, limits })` is the one admission rule, used by the tool, the playground, and `evaluate`. It normalizes the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), validates the schema and JSON-safety, checks `limits` when given, then enforces the byte budget. Two shapes it refuses by name: a `box` question — 0.7.0's own question type for locating a subject in the request's image, while this package sends only `noul`, `choice`, and `score` — and a `null` state, which 0.7.0 no longer accepts. Both raise a `validation` error that names the field. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
+`prepareEvaluationRequest(value, { maxInputBytes, limits })` is the one admission rule, used by the tool, the playground, and `evaluate`. It runs every stage in `ADMISSION_STAGES` (`["normalize", "json_safe", "supported_shape", "schema", "backend_limits", "byte_budget"]`, typed by `AdmissionStage`) in strict order: normalize the near-miss aliases a model produces (`options` / `levels` / `choices` for `criteria`, a string Noul criterion, a label array for a Choice), reject non-JSON values (cycles, getters, `NaN`/`Infinity`), refuse unsupported shapes by name, validate the schema, check `limits` when given, then enforce the byte budget. `parseEvaluationRequest(value)` runs the `json_safe` -> `supported_shape` -> `schema` subset through the same stage reducer. Two shapes it refuses by name: a `box` question — 0.7.0's own question type for locating a subject in the request's image, while this package sends only `noul`, `choice`, and `score` — and a `null` state, which 0.7.0 no longer accepts. Both raise a `validation` error that names the field. `DEFAULT_MAX_INPUT_BYTES`, `DEFAULT_MAX_QUESTIONS`, and `DEFAULT_MAX_REQUESTS` hold the shared defaults.
 
 ## Limits
 
@@ -97,7 +97,7 @@ A registry entry or an endpoint declares its own in `limits`; a field it leaves 
 | `chunkEvaluationRequest(request, { maxQuestions, backend })` | The splitter alone; a pure function, no validation. Chunks of the question limit of `backend` (default `typesafe`: 32), or your smaller `maxQuestions`; a larger one is capped |
 | `fanOut(items, worker, { concurrency, signal, stopOn })` | The pool underneath, for your own work |
 
-Every item comes back as `{ ok: true, index, value }` or `{ ok: false, index, error, skipped }`; `skipped` marks work that was never submitted.
+Every item comes back as a 3-variant `Settled<T>` union discriminated on `status` (`SettledStatus`: `"succeeded" | "failed" | "skipped"`): `{ status: "succeeded", ok: true, index, value }`, `{ status: "failed", ok: false, skipped: false, index, error }`, or `{ status: "skipped", ok: false, skipped: true, skipReason, index, error }` (`SkipReason`: `"aborted" | "stopped"`). Both `ok` / `skipped` narrowing and exhaustive `switch (item.status)` work. The pool records the first stop transition only: if `stopOn` halts the pool on a `budget` error and `signal` aborts while in-flight requests drain, unstarted items still carry `skipReason: "stopped"` and `error.code === "budget"`.
 
 ## Usage and spend
 
@@ -150,11 +150,11 @@ console.log(formatCalibration(calibrate("action guard", samplesOf(results).sampl
 | --- | --- |
 | `auc(samples)` | Rank-based AUC (Mann–Whitney, ties count half); undefined when one class is empty |
 | `metricsAt(samples, threshold)`, `sweep(samples, thresholds)` | Confusion counts plus precision, recall, and flag rate |
-| `defaultThresholds(samples)`, `pickThreshold(rows, floors)` | The distinct-score grid, and the lowest threshold that clears a precision and recall floor |
+| `defaultThresholds(samples)`, `pickThreshold(rows, selection)` | The distinct-score grid, and threshold picking via `ThresholdSelection` (`{ mode: "best_f1" }` or `{ mode: "floors", minPrecision?, minRecall? }`, or plain `{ minPrecision?, minRecall? }`) |
 | `calibrate(name, samples, options)`, `formatCalibration(calibration)` | AUC, the sweep, a recommendation, and what it misses and flags, as text |
-| `replay(cases, score, options)`, `samplesOf(results)` | Run labelled cases through any scorer with bounded concurrency, keep per-case failures, then extract the scored samples |
+| `replay(cases, score, options)`, `samplesOf(results)` | Run labelled cases through any scorer with bounded concurrency, return a `ReplayResult<T>` discriminated union on `status` (`"scored" \| "failed" \| "skipped"`), then extract the scored samples |
 
-`replay` stops on a `budget` failure like the batching calls, and reports each failure with the scorer's own message unless you pass `describeError`.
+`replay` stops on a `budget` failure like the batching calls, turns non-finite scorer outputs (`NaN`, `Infinity`) into `status: "failed"` (`score: undefined`, error `"The scorer returned a non-finite score."`) at the replay boundary, and reports each failure with the scorer's own message unless you pass `describeError`.
 
 ## Login helpers: `pi-typesafe/ui`
 

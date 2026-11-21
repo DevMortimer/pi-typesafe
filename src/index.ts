@@ -6,7 +6,7 @@ export type {
 export { ask, DEFAULT_ASK_TIMEOUT_MS } from "./ask.js";
 export type { AskAnswer, AskOptions, Judge } from "./ask.js";
 export { fanOut, DEFAULT_CONCURRENCY, evaluateMany, evaluateAll, chunkEvaluationRequest } from "./batch.js";
-export type { BatchEvaluation, BatchOptions, FanOutOptions, Settled } from "./batch.js";
+export type { BatchEvaluation, BatchOptions, FanOutOptions, Settled, SettledStatus, SkipReason } from "./batch.js";
 export { authState, authStatePath, clearAuthState, describeAuth, recordAuthFailure, recordAuthVerified, transitionAuthRecord } from "./auth.js";
 export type { AuthEvent, AuthFailure, AuthRecord, AuthReport, AuthState, AuthStatus, AuthWriteOptions } from "./auth.js";
 export {
@@ -20,9 +20,9 @@ export type { BlockedCap, SpendCaps, UsageLedger, UsageLedgerOptions, UsageRepor
 export { TypeSafeIntegrationError, classifyError } from "./errors.js";
 export type { ErrorDisposition, ErrorTarget, IntegrationErrorCode } from "./errors.js";
 export {
-  DEFAULT_BACKEND_LIMITS, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
+  ADMISSION_STAGES, DEFAULT_BACKEND_LIMITS, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
 } from "./schema.js";
-export type { BackendLimits, PrepareEvaluationOptions } from "./schema.js";
+export type { AdmissionStage, BackendLimits, PrepareEvaluationOptions } from "./schema.js";
 export { choice, noul, score } from "@typesafe-ai/sdk";
 export type {
   Questions, Question, SystemOneRequest, SystemOneResult, EntryType, JsonValue,

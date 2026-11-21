@@ -397,8 +397,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         if (action === "logout") {
           const removed = clearStoredApiKey(spec);
           const env = process.env[config.keyEnv]?.trim();
+          clearAuthState(spec);
           if (isActive) {
-            clearAuthState();
             client = undefined;
           }
           consent = transitionConsent(consent, { type: "logout", isActive, hasEnvKey: Boolean(env) });

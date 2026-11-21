@@ -809,10 +809,11 @@ test("SessionRoute, ConsentState, CalloutState, and SessionReadiness transition 
 
   const validRoute = resolveSessionRoute({});
   const invalidRoute = resolveSessionRoute({ PI_TYPESAFE_BACKEND: "open-router" });
-  const okAuth: AuthState = { backend: "typesafe", kind: "environment", source: "environment", path: "/fake/auth.json", keyName: "TYPESAFE_API_KEY", verified: true, usable: true };
-  const missingAuth: AuthState = { backend: "typesafe", kind: "missing", path: "/fake/auth.json", keyName: "no key", verified: false, usable: false };
+  const okAuth: AuthState = { backend: "typesafe", status: "verified", kind: "environment", source: "environment", path: "/fake/auth.json", keyName: "TYPESAFE_API_KEY", verified: true, usable: true };
+  const missingAuth: AuthState = { backend: "typesafe", status: "missing", kind: "missing", path: "/fake/auth.json", keyName: "no key", verified: false, usable: false };
   const rejectedAuth: AuthState = {
     ...okAuth,
+    status: "rejected",
     verified: false,
     usable: false,
     lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401.", at: new Date().toISOString() },
@@ -822,9 +823,19 @@ test("SessionRoute, ConsentState, CalloutState, and SessionReadiness transition 
     today: { day: "2026-11-21", requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 },
     caps: { maxRequests: 20 },
     usdPerMTok: 0.042,
+    budget: { status: "within_budget", remainingRequests: 20 },
   };
-  const sessionCappedSpend: SpendReport = { ...baseSpend, session: { ...baseSpend.session, requestsStarted: 20 } };
-  const dailyCappedSpend: SpendReport = { ...baseSpend, blocked: { cap: "requestsPerDay", limit: 10, used: 10, day: "2026-11-21" } };
+  const sessionCappedSpend: SpendReport = {
+    ...baseSpend,
+    session: { ...baseSpend.session, requestsStarted: 20 },
+    budget: { status: "session_cap_reached", used: 20, limit: 20 },
+  };
+  const dailyBlocked = { cap: "requestsPerDay" as const, limit: 10, used: 10, day: "2026-11-21" };
+  const dailyCappedSpend: SpendReport = {
+    ...baseSpend,
+    blocked: dailyBlocked,
+    budget: { status: "daily_cap_reached", blocked: dailyBlocked },
+  };
 
   const readinessCases: Array<{ input: Parameters<typeof deriveSessionReadiness>[0]; status: ReturnType<typeof deriveSessionReadiness>["status"]; budgetReason?: "session_cap" | "daily_cap" }> = [
     { input: { route: invalidRoute, consent: { status: "disabled" } }, status: "invalid_backend" },
