@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
+  ADMISSION_STAGES, DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest, TypeSafeIntegrationError,
 } from "../src/index.js";
+import type { AdmissionStage } from "../src/index.js";
 
 const hasCode = (code: string) => (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === code;
 
@@ -91,4 +92,75 @@ test("a box question is refused by name, and a null state is refused, before the
   // 0.7.0 requires a state that is not null, so the request is refused instead of sent with a null state.
   assert.throws(() => prepareEvaluationRequest({ state: null, questions: { yes: { type: "noul", instructions: "?" } } }), names(/^state must not be null/));
   assert.doesNotThrow(() => prepareEvaluationRequest({ state: "s", questions: { yes: { type: "noul", instructions: "?" } } }));
+});
+
+test("ADMISSION_STAGES declares exact stage order and refusal precedence", () => {
+  const expectedStages: readonly AdmissionStage[] = ["normalize", "json_safe", "supported_shape", "schema", "backend_limits", "byte_budget"];
+  assert.deepEqual(ADMISSION_STAGES, expectedStages);
+
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  let getterRan = false;
+  const withGetter = Object.defineProperty({}, "secret", {
+    enumerable: true,
+    get() {
+      getterRan = true;
+      return "leaked";
+    },
+  });
+
+  const tightLimits = { maxQuestions: 1, minChoiceOptions: 2, maxChoiceOptions: 64, maxScoreLevels: 10 };
+  const cases: ReadonlyArray<{ name: string; run: () => unknown; match: RegExp }> = [
+    {
+      name: "json_safe beats supported_shape on cycle",
+      run: () => prepareEvaluationRequest({ state: cycle, questions: { target: { type: "box", instructions: "?" } } }),
+      match: /must be plain JSON/,
+    },
+    {
+      name: "json_safe beats supported_shape on getter without invoking getter",
+      run: () => prepareEvaluationRequest({ state: withGetter, questions: { target: { type: "box", instructions: "?" } } }),
+      match: /must be plain JSON/,
+    },
+    {
+      name: "supported_shape beats schema on null state",
+      run: () => prepareEvaluationRequest({ state: null, questions: {} }),
+      match: /^state must not be null/,
+    },
+    {
+      name: "supported_shape beats schema on box question",
+      run: () => prepareEvaluationRequest({ state: "s", questions: { target: { type: "box" } } }),
+      match: /questions\.target\.type: "box" is not a question type this package sends/,
+    },
+    {
+      name: "schema beats backend_limits",
+      run: () => prepareEvaluationRequest({ state: "s", questions: { q: { type: "choice", criteria: {} } } }, { limits: tightLimits, maxInputBytes: 1 }),
+      match: /^Invalid evaluation request at /,
+    },
+    {
+      name: "backend_limits beats byte_budget",
+      run: () => prepareEvaluationRequest(
+        { state: "s", questions: { q1: { type: "noul", instructions: "?" }, q2: { type: "noul", instructions: "?" } } },
+        { limits: tightLimits, maxInputBytes: 1 },
+      ),
+      match: /^Evaluation exceeds the backend's limits: 2 questions, at most 1 per request/,
+    },
+    {
+      name: "byte_budget fires when all earlier stages pass",
+      run: () => prepareEvaluationRequest(
+        { state: "s", questions: { q1: { type: "noul", instructions: "?" } } },
+        { limits: tightLimits, maxInputBytes: 1 },
+      ),
+      match: /^Evaluation exceeds the 1-byte input limit\.$/,
+    },
+    {
+      name: "parseEvaluationRequest enforces json_safe before supported_shape",
+      run: () => parseEvaluationRequest({ state: cycle, questions: { target: { type: "box", instructions: "?" } } }),
+      match: /must be plain JSON/,
+    },
+  ];
+
+  for (const entry of cases) {
+    assert.throws(entry.run, (error: unknown) => error instanceof TypeSafeIntegrationError && error.code === "validation" && entry.match.test(error.message), entry.name);
+  }
+  assert.equal(getterRan, false);
 });

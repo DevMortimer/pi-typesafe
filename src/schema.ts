@@ -103,16 +103,59 @@ function describeSchemaErrors(value: unknown): string {
   return details.join("; ");
 }
 
+/** Canonical request admission stages, in strict precedence order. */
+export const ADMISSION_STAGES = [
+  "normalize",
+  "json_safe",
+  "supported_shape",
+  "schema",
+  "backend_limits",
+  "byte_budget",
+] as const;
+
+export type AdmissionStage = (typeof ADMISSION_STAGES)[number];
+
+const PARSE_STAGE_SET: ReadonlySet<AdmissionStage> = new Set(["json_safe", "supported_shape", "schema"]);
+// Derive parse stages from ADMISSION_STAGES so stage ordering is declared once.
+const PARSE_STAGES: readonly AdmissionStage[] = ADMISSION_STAGES.filter(stage => PARSE_STAGE_SET.has(stage));
+
+function runAdmissionStage(stage: AdmissionStage, value: unknown, options: PrepareEvaluationOptions): unknown {
+  switch (stage) {
+    case "normalize":
+      return normalizeEvaluationRequest(value);
+    case "json_safe":
+      if (value !== null && typeof value === "object" && !Array.isArray(value) && !isJsonSafe(value)) {
+        throw new TypeSafeIntegrationError("validation", `Invalid evaluation request: state and questions must be plain JSON. ${usage}`);
+      }
+      return value;
+    case "supported_shape":
+      refuseUnsupported(value);
+      return value;
+    case "schema":
+      if (!Check(evaluationSchema, value)) {
+        throw new TypeSafeIntegrationError("validation", `Invalid evaluation request at ${describeSchemaErrors(value)}. ${usage}`);
+      }
+      return value;
+    case "backend_limits":
+      if (options.limits !== undefined) assertWithinBackendLimits(value as SystemOneRequest, options.limits);
+      return value;
+    case "byte_budget":
+      assertWithinByteLimit(JSON.stringify(value), options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES);
+      return value;
+  }
+}
+
+function admitEvaluationRequest(value: unknown, stages: readonly AdmissionStage[], options: PrepareEvaluationOptions = {}): SystemOneRequest {
+  let current = value;
+  for (const stage of stages) {
+    current = runAdmissionStage(stage, current, options);
+  }
+  return current as SystemOneRequest;
+}
+
 /** Validate without including submitted content in validation errors. Prefer prepareEvaluationRequest(), which also accepts near-misses and enforces the byte budget. */
 export function parseEvaluationRequest(value: unknown): SystemOneRequest {
-  if (value !== null && typeof value === "object" && !Array.isArray(value) && !isJsonSafe(value)) {
-    throw new TypeSafeIntegrationError("validation", `Invalid evaluation request: state and questions must be plain JSON. ${usage}`);
-  }
-  refuseUnsupported(value);
-  if (!Check(evaluationSchema, value)) {
-    throw new TypeSafeIntegrationError("validation", `Invalid evaluation request at ${describeSchemaErrors(value)}. ${usage}`);
-  }
-  return value as SystemOneRequest;
+  return admitEvaluationRequest(value, PARSE_STAGES);
 }
 
 function isJsonSafe(value: unknown): boolean {
@@ -213,8 +256,5 @@ export function assertWithinByteLimit(text: string, maxInputBytes: number): void
  * pass through here, so what one accepts the others accept.
  */
 export function prepareEvaluationRequest(value: unknown, options: PrepareEvaluationOptions = {}): SystemOneRequest {
-  const validated = parseEvaluationRequest(normalizeEvaluationRequest(value));
-  if (options.limits !== undefined) assertWithinBackendLimits(validated, options.limits);
-  assertWithinByteLimit(JSON.stringify(validated), options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES);
-  return validated;
+  return admitEvaluationRequest(value, ADMISSION_STAGES, options);
 }

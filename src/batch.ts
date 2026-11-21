@@ -8,10 +8,44 @@ import { DEFAULT_BACKEND_LIMITS, prepareEvaluationRequest } from "./schema.js";
 /** Default number of requests in flight. TypeSafe answers in isolation, so a small pool is enough. */
 export const DEFAULT_CONCURRENCY = 4;
 
-/** One item's outcome. `skipped` marks work that was never started because of an abort or a stop rule. */
+/** Terminal state of one item in a batch. */
+export type SettledStatus = "succeeded" | "failed" | "skipped";
+
+/** Why an unstarted batch item was skipped. */
+export type SkipReason = "aborted" | "stopped";
+
+/** One item's outcome. `status` discriminates every terminal state while keeping `ok` and `skipped` narrowable. */
 export type Settled<T> =
-  | { readonly ok: true; readonly index: number; readonly value: T }
-  | { readonly ok: false; readonly index: number; readonly error: unknown; readonly skipped: boolean };
+  | { readonly status: "succeeded"; readonly ok: true; readonly index: number; readonly value: T }
+  | { readonly status: "failed"; readonly ok: false; readonly skipped: false; readonly index: number; readonly error: unknown }
+  | { readonly status: "skipped"; readonly ok: false; readonly skipped: true; readonly skipReason: SkipReason; readonly index: number; readonly error: TypeSafeIntegrationError };
+
+type PoolState =
+  | { readonly status: "running" }
+  | { readonly status: "stopping"; readonly reason: SkipReason; readonly cause?: unknown };
+
+// First stop transition wins so a late signal abort during drain cannot overwrite a prior stop cause.
+function transitionPool(state: PoolState, reason: SkipReason, cause?: unknown): PoolState {
+  if (state.status === "stopping") return state;
+  return cause === undefined ? { status: "stopping", reason } : { status: "stopping", reason, cause };
+}
+
+function skippedItem(index: number, reason: SkipReason, cause?: unknown): Extract<Settled<never>, { status: "skipped" }> {
+  if (reason === "aborted") {
+    return {
+      status: "skipped",
+      ok: false,
+      skipped: true,
+      skipReason: "aborted",
+      index,
+      error: new TypeSafeIntegrationError("aborted", "TypeSafe batch cancelled before this request was submitted."),
+    };
+  }
+  const error = cause instanceof TypeSafeIntegrationError && cause.code === "budget"
+    ? new TypeSafeIntegrationError("budget", "TypeSafe batch stopped after a budget limit was reached; this request was not submitted.")
+    : new TypeSafeIntegrationError("aborted", "TypeSafe batch stopped after a failed request; this request was not submitted.");
+  return { status: "skipped", ok: false, skipped: true, skipReason: "stopped", index, error };
+}
 
 export interface FanOutOptions {
   /** Requests in flight at once. Default: DEFAULT_CONCURRENCY. */
@@ -30,27 +64,39 @@ export async function fanOut<I, O>(items: readonly I[], worker: (item: I, index:
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULT_CONCURRENCY));
   const results = new Array<Settled<O> | undefined>(items.length);
   let next = 0;
-  let stopped = false;
+  const pool: { state: PoolState } = { state: { status: "running" } };
+  const stopPool = (reason: SkipReason, cause?: unknown): void => {
+    pool.state = transitionPool(pool.state, reason, cause);
+  };
+  const onAbort = (): void => { stopPool("aborted"); };
+  if (options.signal?.aborted) stopPool("aborted");
+  else options.signal?.addEventListener?.("abort", onAbort, { once: true });
+
   const run = async (): Promise<void> => {
-    while (!stopped) {
-      const index = next++;
-      if (index >= items.length) return;
+    while (pool.state.status === "running") {
       if (options.signal?.aborted) {
-        stopped = true;
+        stopPool("aborted");
         return;
       }
+      const index = next++;
+      if (index >= items.length) return;
       try {
-        results[index] = { ok: true, index, value: await worker(items[index] as I, index) };
+        results[index] = { status: "succeeded", ok: true, index, value: await worker(items[index] as I, index) };
       } catch (error) {
-        results[index] = { ok: false, index, error, skipped: false };
-        if (options.stopOn?.(error)) stopped = true;
+        results[index] = { status: "failed", ok: false, skipped: false, index, error };
+        if (options.stopOn?.(error)) stopPool("stopped", error);
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  const reason = options.signal?.aborted ? "TypeSafe batch cancelled before this request was submitted." : "TypeSafe batch stopped after a failed request; this request was not submitted.";
-  for (let index = 0; index < items.length; index++) {
-    if (!results[index]) results[index] = { ok: false, index, error: new TypeSafeIntegrationError("aborted", reason), skipped: true };
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
+  } finally {
+    options.signal?.removeEventListener?.("abort", onAbort);
+  }
+  if (pool.state.status === "stopping") {
+    for (let index = 0; index < items.length; index++) {
+      if (!results[index]) results[index] = skippedItem(index, pool.state.reason, pool.state.cause);
+    }
   }
   return results as Settled<O>[];
 }
@@ -89,15 +135,20 @@ function summarize<Q extends Questions>(results: readonly Settled<Evaluation<Q>>
   let skipped = 0;
   let model: string | undefined;
   for (const result of results) {
-    if (!result.ok) {
-      if (result.skipped) skipped++;
-      continue;
+    switch (result.status) {
+      case "succeeded":
+        succeeded++;
+        Object.assign(answers, result.value.answers);
+        inputTokens += result.value.usage.input_tokens ?? 0;
+        outputTokens += result.value.usage.output_tokens ?? 0;
+        model ??= result.value.model;
+        break;
+      case "skipped":
+        skipped++;
+        break;
+      case "failed":
+        break;
     }
-    succeeded++;
-    Object.assign(answers, result.value.answers);
-    inputTokens += result.value.usage.input_tokens ?? 0;
-    outputTokens += result.value.usage.output_tokens ?? 0;
-    model ??= result.value.model;
   }
   return {
     ok: succeeded === results.length,
