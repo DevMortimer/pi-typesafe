@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.15.1
+
+### Changed
+
+- Optional `peerDependencies` for `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` now accept `>=0.85.1 <2` (previously `<1`), matching Pi 1.x (`1.4.0`) without `ERESOLVE` peer conflicts while keeping Pi 0.85+ compatible.
+
 ## 0.15.0
 
 ### Added
