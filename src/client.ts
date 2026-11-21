@@ -141,6 +141,12 @@ export interface UsageSnapshot {
   readonly estimatedUsd: number;
 }
 
+/** Explicit budget machine: daily cap takes precedence over session cap because it persists across client instances. */
+export type BudgetState =
+  | { readonly status: "within_budget"; readonly remainingRequests: number }
+  | { readonly status: "session_cap_reached"; readonly used: number; readonly limit: number }
+  | { readonly status: "daily_cap_reached"; readonly blocked: BlockedCap };
+
 /** Session counters, today's persisted counters, the caps in force, and the cap that is currently reached. */
 export interface SpendReport {
   readonly session: UsageSnapshot;
@@ -149,6 +155,7 @@ export interface SpendReport {
   /** The price of this client's default model. A request that names another model may be priced differently. */
   readonly usdPerMTok: number;
   readonly blocked?: BlockedCap;
+  readonly budget: BudgetState;
 }
 
 export interface TypeSafe {
@@ -237,6 +244,23 @@ function capsDescription(caps: SpendCaps): string {
   return parts.length ? `Caps: ${parts.join(", ")}.` : "No request or spend caps are set.";
 }
 
+function evaluateBudget(requestsStarted: number, maxRequests: number, dailyBlocked: BlockedCap | undefined): BudgetState {
+  if (dailyBlocked !== undefined) return { status: "daily_cap_reached", blocked: dailyBlocked };
+  if (requestsStarted >= maxRequests) return { status: "session_cap_reached", used: requestsStarted, limit: maxRequests };
+  return { status: "within_budget", remainingRequests: maxRequests - requestsStarted };
+}
+
+type ClientAuthSync = "unsynced" | "verified" | "degraded";
+type AuthSyncEvent =
+  | { readonly type: "verified" }
+  | { readonly type: "failed"; readonly error: TypeSafeIntegrationError };
+
+type AttemptState = "in_flight" | "succeeded" | "failed";
+interface Attempt {
+  succeed(inputTokens: number, outputTokens: number, costUsd: number): boolean;
+  fail(): boolean;
+}
+
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const backend: ResolvedBackend = resolveBackend(options.backend);
@@ -295,35 +319,73 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const ledger = options.ledger ?? openUsageLedger(callerRate === undefined ? {} : { usdPerMTok: callerRate });
   let sessionUsd = 0;
   const usage = { requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0 };
-  // Auth state writes are deduplicated: one verification record per process, one record per distinct failure.
-  let verificationRecorded = false;
-  let lastFailureRecorded: string | undefined;
+  const authTarget = options.backend === undefined ? {} : { backend: options.backend };
+  let authSync: ClientAuthSync = "unsynced";
+
+  const syncAuth = (event: AuthSyncEvent): void => {
+    switch (event.type) {
+      case "verified":
+        // Skip redundant disk writes while already verified; degraded transitions back to verified to clear lastFailure.
+        if (authSync === "verified") return;
+        authSync = "verified";
+        recordAuthVerified(undefined, authTarget);
+        return;
+      case "failed":
+        // Every failure writes because its timestamp anchors the rejection window.
+        authSync = "degraded";
+        recordAuthFailure(event.error, undefined, authTarget);
+        return;
+    }
+  };
+
+  // Single-settlement attempt machine keeps requestsStarted === requestsSucceeded + requestsFailed by construction.
+  const startAttempt = (): Attempt => {
+    let state: AttemptState = "in_flight";
+    usage.requestsStarted += 1;
+    ledger.recordStart();
+    return {
+      succeed(inputTokens: number, outputTokens: number, costUsd: number): boolean {
+        if (state !== "in_flight") return false;
+        state = "succeeded";
+        usage.requestsSucceeded += 1;
+        usage.inputTokens += inputTokens;
+        usage.outputTokens += outputTokens;
+        sessionUsd += costUsd;
+        ledger.recordSuccess(inputTokens, outputTokens, costUsd);
+        return true;
+      },
+      fail(): boolean {
+        if (state !== "in_flight") return false;
+        state = "failed";
+        usage.requestsFailed += 1;
+        ledger.recordFailure();
+        return true;
+      },
+    };
+  };
 
   const snapshot = (): UsageSnapshot => ({ ...usage, estimatedUsd: Math.round(sessionUsd * 1e6) / 1e6 });
-  const blocked = (): BlockedCap | undefined => (usage.requestsStarted >= maxRequests ? undefined : ledger.blocked(caps));
 
   const typesafe: TypeSafe = {
     limits: backend.limits,
     getUsage: snapshot,
     getSpend: () => {
-      const reached = blocked();
+      const reached = ledger.blocked(caps);
       return {
         session: snapshot(),
         today: ledger.today(),
         caps,
         usdPerMTok,
         ...(reached === undefined ? {} : { blocked: reached }),
+        budget: evaluateBudget(usage.requestsStarted, maxRequests, reached),
       };
     },
     async listModels(callOptions: EvaluationOptions = {}): Promise<string[]> {
       try {
         const models = await client.models.list(callOptions);
-        if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected model list.");
+        if (!Array.isArray(models)) throw new TypeSafeIntegrationError("response", `${backend.label} returned an unexpected model list.`);
         // A backend that serves its list publicly accepts any key, so a success there proves nothing about one.
-        if (backend.modelsVerifyKey && !verificationRecorded) {
-          verificationRecorded = true;
-          recordAuthVerified();
-        }
+        if (backend.modelsVerifyKey) syncAuth({ type: "verified" });
         return models.map(card => card?.name).filter((name): name is string => typeof name === "string" && name.length > 0 && name.length <= 100);
       } catch (error) {
         throw safeError(error, backend);
@@ -335,48 +397,36 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       const sentModel = validated.model === undefined ? model : mapModel(validated.model);
       const body = JSON.stringify({ ...validated, model: sentModel });
       assertWithinByteLimit(body, maxInputBytes);
-      if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", "TypeSafe request cancelled before submission.");
-      if (usage.requestsStarted >= maxRequests) {
-        throw new TypeSafeIntegrationError("budget", `TypeSafe request limit reached (${maxRequests} attempts per client instance). ${capsDescription(caps)}`);
-      }
-      const reached = ledger.blocked(caps);
-      if (reached) {
+      if (callOptions.signal?.aborted) throw new TypeSafeIntegrationError("aborted", `${backend.label} request cancelled before submission.`);
+      const budget = evaluateBudget(usage.requestsStarted, maxRequests, ledger.blocked(caps));
+      if (budget.status === "daily_cap_reached") {
         // Name the cap, the used amount, and the day, so a long run stops loudly instead of burning tokens unnoticed.
-        throw new TypeSafeIntegrationError("budget", `TypeSafe ${CAP_LABELS[reached.cap]} reached (${reached.used} of ${reached.limit} on ${reached.day}); no request was submitted. Requests resume after the local day rolls over, or raise the cap deliberately.`);
+        const reached = budget.blocked;
+        throw new TypeSafeIntegrationError("budget", `${backend.label} ${CAP_LABELS[reached.cap]} reached (${reached.used} of ${reached.limit} on ${reached.day}); no request was submitted. Requests resume after the local day rolls over, or raise the cap deliberately.`);
+      }
+      if (budget.status === "session_cap_reached") {
+        throw new TypeSafeIntegrationError("budget", `${backend.label} request limit reached (${budget.limit} attempts per client instance). ${capsDescription(caps)}`);
       }
       // Snapshot before awaiting so later mutations cannot change the request or validation.
       const request = JSON.parse(body) as SystemOneRequest<Q>;
-      usage.requestsStarted += 1;
-      ledger.recordStart();
+      const attempt = startAttempt();
       const start = performance.now();
       try {
         const result = await client.systemOne(request, callOptions);
-        if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", "TypeSafe returned an unexpected answer or usage format.");
-        usage.requestsSucceeded += 1;
+        if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", `${backend.label} returned an unexpected answer or usage format.`);
         // An unreported count is not a count this package can add, price, or charge against a token cap.
         const inputTokens = result.usage.input_tokens ?? 0;
         const outputTokens = result.usage.output_tokens ?? 0;
-        usage.inputTokens += inputTokens;
-        usage.outputTokens += outputTokens;
         // Unrounded: a small request must still count toward the cap.
         const cost = (inputTokens * rateFor(sentModel)) / 1e6;
-        sessionUsd += cost;
-        ledger.recordSuccess(inputTokens, outputTokens, cost);
-        if (!verificationRecorded) {
-          verificationRecorded = true;
-          recordAuthVerified();
-        }
+        attempt.succeed(inputTokens, outputTokens, cost);
+        syncAuth({ type: "verified" });
         return { ...result, elapsedMs: Math.round(performance.now() - start) };
       } catch (error) {
         const safe = safeError(error, backend);
         // The request was submitted, so it counts even when it fails; the reason stays visible in `authState()`.
-        usage.requestsFailed += 1;
-        ledger.recordFailure();
-        const fingerprint = `${safe.code}:${safe.status ?? ""}:${safe.message}`;
-        if (lastFailureRecorded !== fingerprint) {
-          lastFailureRecorded = fingerprint;
-          recordAuthFailure(safe);
-        }
+        attempt.fail();
+        syncAuth({ type: "failed", error: safe });
         throw safe;
       }
     },

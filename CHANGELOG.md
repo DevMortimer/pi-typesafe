@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 0.15.0
+
+### Added
+
+- Explicit discriminated-union state machines across auth, budgets, error handling, batching, calibration, admission, login, and the Pi extension:
+  - `AuthStatus` (`missing`, `unusable`, `rejected`, `rejection_expired`, `unverified`, `verified`) on `AuthState.status` and pure `transitionAuthRecord(record, event)`, with optional backend and path targeting on `recordAuthVerified`, `recordAuthFailure`, and `clearAuthState`.
+  - `BudgetState` (`within_budget`, `session_cap_reached`, `daily_cap_reached`) on `SpendReport.budget`.
+  - `ErrorDisposition` (`transient` with optional `retryAfterSeconds` vs `permanent` with remediation `target`), pure `classifyError(error)` supporting `TypeSafeIntegrationError`, SDK errors, failed `AskAnswer` envelopes, and unknown throwables, plus non-enumerable `disposition` and `retryable` getters on `TypeSafeIntegrationError.prototype` that keep `JSON.stringify` and deep-equality shapes unchanged.
+  - 3-variant `Settled<T>` discriminated on `status` (`"succeeded" | "failed" | "skipped"`, with `skipReason: "aborted" | "stopped"` on skipped items), 3-variant `ReplayResult<T>` discriminated on `status` (`"scored" | "failed" | "skipped"`), `ThresholdSelection` modes (`best_f1` vs `floors`) in `pickThreshold`, `ADMISSION_STAGES` / `AdmissionStage`, and interactive login/prompt state types on `pi-typesafe/ui`.
+
+### Changed
+
+- `auth-state.json` now stores verification and failure records per backend under `backends[credentialId(backend)]` (`version: 1`) so an HTTP 401 or `clearAuthState(backend)` on one backend never affects another. Existing pre-0.15 top-level `{ verifiedAt, lastFailure }` files heal on read into `typesafe` and migrate on the next write.
+- `prepareEvaluationRequest` and `parseEvaluationRequest` run through one ordered `ADMISSION_STAGES` reducer, keeping every existing validation rule and message unchanged.
+
+### Fixed
+
+- When `PI_TYPESAFE_BACKEND` names an invalid backend, `/typesafe enable`, `/typesafe setup`, `/typesafe test`, and `/typesafe playground` now decline with a warning naming `PI_TYPESAFE_BACKEND` instead of falling back to `api.typesafe.ai`.
+- A client instance that succeeded, failed with HTTP 401, and later succeeded again now clears `lastFailure` and restores `verified` in `auth-state.json`; previously a one-way flag suppressed `recordAuthVerified` after the first success.
+- Session degradation callouts re-arm after recovery (a successful evaluation or active `/typesafe login`), so a second key rejection later in the same session is reported instead of suppressed; `/typesafe status` and `/typesafe setup` also surface exhausted per-session attempt caps (`20/20`).
+- Candidate-key judge probes during `/typesafe login` on backends with public model lists (`openrouter`, `commandcode`, `subq`) run against an isolated in-memory ledger and restore `auth-state.json` on failure, so a mistyped or rejected key never writes `usage.json`, trips daily caps, or marks an active backend rejected; `KeyPrompt` settles at most once on trailing input.
+- Reaching `maxRequests` no longer masks a reached daily cap in `getSpend().blocked`.
+- `fanOut` records the first pool stop transition so a late `AbortSignal` abort during drain cannot overwrite a prior `budget` stop, stamps unstarted items after a budget stop with `code: "budget"`, and `replay` turns non-finite scorer outputs (`NaN`, `Infinity`) into `status: "failed"` at the replay boundary.
+
+## 0.14.0
+
+### Added
+
+- Nace.AI is a judgment backend, `nace` on `console.nace.ai` with the key from `NACE_API_KEY` and the model `drex-v2.0`. It serves the SDK's own request and model-list paths, so the list verifies a key and `/typesafe login nace` proves one with it. Prices follow the published rates per million input tokens: `drex-v2.0` $0.060, `drex-v1.5` $0.050, `drex-max` and `drex-max-v1.1` $0.030, with each alias priced at the version that answers it. Nace declares no narrower limits, because it accepted every request shape the schema allows.
+
+## 0.13.2
+
+### Fixed
+
+- A request refused with HTTP 403 no longer marks the key as rejected. `authState()` reported `usable: false` for every later call, with no expiry, after a single 403 — a status that means insufficient permissions, a guardrail block, moderation, or a provider cap, each of which belongs to one request. A 403 is still recorded in `lastFailure` and still shown, and it no longer changes `usable` or `verified`. Only an HTTP 401 rejects the key, and that rejection now expires fifteen minutes after it was recorded: `usable` returns to true, `verified` follows `verifiedAt`, and `describeAuth()` says the key was rejected at that time and that the next request proves it. A state file written by 0.13.1 heals on read, with no reset and no schema change; the stored timestamp was already there, and nothing was reading it.
+- A repeated failure refreshes the stored record every time, so a second identical 401 restarts the fifteen-minute window instead of letting the first one expire while the key still fails.
+- Request-outcome and budget messages name the backend that answered — `TypeSafe`, `OpenRouter`, `Command Code`, `Liquid AI`, `SubQ`, or a caller's endpoint label — instead of always saying TypeSafe. The abort, timeout, connection, and response messages and the session and daily cap errors change the same way.
+- `/typesafe status` and the session-start notice say that a judgment will fail instead of saying it is skipped, because nothing in this package skips one.
+
 ## 0.13.1
 
 ### Fixed

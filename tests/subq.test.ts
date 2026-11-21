@@ -125,7 +125,7 @@ test("subq's error shapes become safe errors that name SUBQ_API_KEY and never qu
       assert.ok(error instanceof TypeSafeIntegrationError);
       assert.equal(error.code, "http");
       assert.equal(error.status, status);
-      assert.equal(error.message, `TypeSafe returned HTTP ${status}. ${advice} No automatic retry was made.`);
+      assert.equal(error.message, `SubQ returned HTTP ${status}. ${advice} No automatic retry was made.`);
       assert.ok(!error.message.includes("secret detail"));
       return true;
     });

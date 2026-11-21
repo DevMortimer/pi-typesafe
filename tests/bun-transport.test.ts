@@ -96,7 +96,7 @@ test("a non-2xx body keeps its status and headers", async () => {
     assert.equal(error.code, "http");
     assert.equal(error.status, 429);
     // The Retry-After count reaches the message only if the headers were carried across.
-    assert.equal(error.message, "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made.");
+    assert.equal(error.message, "Local returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made.");
     assert.equal(server.requests(), 1);
   } finally {
     await server.close();

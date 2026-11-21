@@ -246,7 +246,7 @@ test("backend must be a registry name or a backend object", () => {
     assertRefuses(backend, "backend must be a registry name or a backend object.");
   }
   // An unknown name keeps the registry's own error.
-  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode, liquid, subq.');
+  assertRefuses("unknown-backend", 'Unknown judgment backend "unknown-backend". Valid backends: typesafe, openrouter, commandcode, liquid, subq, nace.');
 });
 
 test("authState refuses an invalid backend instead of reporting a status", () => {
@@ -379,8 +379,8 @@ test("a malformed reply on an endpoint is a response error", async () => {
 // 7. 401 advice names each backend's own key variable.
 
 test("401 advice names each backend's own key variable", () => {
-  assert.equal(safeError(new APIError(401, undefined, new Headers()), "commandcode").message, "TypeSafe returned HTTP 401. Check COMMANDCODE_API_KEY. No automatic retry was made.");
-  assert.equal(safeError(new APIError(401, undefined, new Headers()), gateway).message, "TypeSafe returned HTTP 401. Check GATEWAY_JEV_KEY. No automatic retry was made.");
+  assert.equal(safeError(new APIError(401, undefined, new Headers()), "commandcode").message, "Command Code returned HTTP 401. Check COMMANDCODE_API_KEY. No automatic retry was made.");
+  assert.equal(safeError(new APIError(401, undefined, new Headers()), gateway).message, "Gateway returned HTTP 401. Check GATEWAY_JEV_KEY. No automatic retry was made.");
 });
 
 // 8. resolveBackend and backendHost.
@@ -414,7 +414,7 @@ test("backendFromEnvironment reads PI_TYPESAFE_BACKEND and default only when uns
   assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "   " }), "typesafe");
   assert.equal(backendFromEnvironment({ [BACKEND_ENV]: "typesafe" }), "typesafe");
   assert.equal(backendFromEnvironment({ [BACKEND_ENV]: " openrouter " }), "openrouter");
-  for (const name of ["openrouter", "commandcode", "liquid", "subq"] as const) {
+  for (const name of ["openrouter", "commandcode", "liquid", "subq", "nace"] as const) {
     assert.equal(backendFromEnvironment({ [BACKEND_ENV]: name }), name);
   }
   // A typo must fail loudly at startup rather than send judgments somewhere unintended.

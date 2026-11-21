@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, openUsageLedger, TypeSafeIntegrationError } from "../src/index.js";
+import { AUTH_REJECTION_TTL_MS, authStatePath } from "../src/auth.js";
+import { piTypesafeDir } from "../src/credentials.js";
 import { safeError } from "../src/errors.js";
 import { APIError } from "@typesafe-ai/sdk";
 import type { Questions, SystemOneRequest } from "../src/index.js";
@@ -217,20 +219,22 @@ test("HTTP errors are classified, never retried, and do not expose response secr
   }
 });
 
-test("HTTP advice names the backend's key, covers 402, and quotes a numeric Retry-After", async () => {
+test("HTTP advice names the backend that answered, covers 402, and quotes a numeric Retry-After", async () => {
   const savedTypesafeKey = process.env.TYPESAFE_API_KEY;
   const savedOpenRouterKey = process.env.OPENROUTER_API_KEY;
   // authState({ backend }).usable needs a key present for each backend; the client itself takes its key below.
   process.env.TYPESAFE_API_KEY = "offline-env-key-0123456789abcdef";
   process.env.OPENROUTER_API_KEY = "offline-or-key-0123456789abcdef";
   const cases = [
-    { backend: "typesafe", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made." },
-    { backend: "openrouter", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made." },
-    { backend: "typesafe", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Check your account balance. No automatic retry was made." },
-    { backend: "openrouter", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Insufficient credits. Add credits at https://openrouter.ai/credits. No automatic retry was made." },
-    { backend: "typesafe", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
-    { backend: "openrouter", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
-    { backend: "typesafe", status: 429, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 401, retryAfter: true, usable: false, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 401, retryAfter: true, usable: false, message: "OpenRouter returned HTTP 401. Check OPENROUTER_API_KEY. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 402, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 402. Check your account balance. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 402, retryAfter: true, usable: true, message: "OpenRouter returned HTTP 402. Insufficient credits. Add credits at https://openrouter.ai/credits. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 403, retryAfter: false, usable: true, message: "OpenRouter returned HTTP 403. Check your account access and model permissions. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 403, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 403. Check your account access and model permissions. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 429, retryAfter: true, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "openrouter", subject: "OpenRouter", status: 429, retryAfter: true, usable: true, message: "OpenRouter returned HTTP 429. Check your account quota and try again later. Retry after 7 seconds. No automatic retry was made." },
+    { backend: "typesafe", subject: "TypeSafe", status: 429, retryAfter: false, usable: true, message: "TypeSafe returned HTTP 429. Check your account quota and try again later. No automatic retry was made." },
   ] as const;
   try {
     for (const c of cases) {
@@ -245,16 +249,53 @@ test("HTTP advice names the backend's key, covers 402, and quotes a numeric Retr
         assert.equal(error.code, "http");
         assert.equal(error.status, c.status);
         assert.equal(error.message, c.message);
+        // The subject is the backend that answered, never a fixed TypeSafe.
+        assert.ok(error.message.startsWith(`${c.subject} returned HTTP ${c.status}.`), `${c.backend} ${c.status}`);
         assert.equal(error.message.includes("never-print-me"), false);
         return true;
       });
-      // A 401 rejects the key; a 402 is billing, so it must leave it usable (REJECTED_STATUSES stays {401, 403}).
+      // A 401 rejects the key; a 403 refuses one request and a 402 is billing, so neither touches `usable`.
       assert.equal(authState({ backend: c.backend }).usable, c.usable, `${c.backend} ${c.status}`);
     }
   } finally {
     clearAuthState();
     if (savedTypesafeKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTypesafeKey;
     if (savedOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOpenRouterKey;
+  }
+});
+
+test("budget messages name the backend that refused, not TypeSafe", async () => {
+  const ledgerPath = () => join(mkdtempSync(join(tmpdir(), "pi-typesafe-budget-")), "usage.json");
+  const session = createTypeSafe({ apiKey: "test-key", backend: "openrouter", maxRequests: 1, fetch: async () => responseFor(sample().questions) });
+  await session.evaluate(sample());
+  await assert.rejects(session.evaluate(sample()), error => error instanceof TypeSafeIntegrationError && error.message.startsWith("OpenRouter request limit reached (1 attempts per client instance)."), "session cap names OpenRouter");
+
+  const daily = createTypeSafe({
+    apiKey: "test-key",
+    backend: "openrouter",
+    maxRequestsPerDay: 1,
+    ledger: openUsageLedger({ path: ledgerPath() }),
+    fetch: async () => responseFor(sample().questions),
+  });
+  await daily.evaluate(sample());
+  await assert.rejects(daily.evaluate(sample()), error => error instanceof TypeSafeIntegrationError && error.message.startsWith("OpenRouter daily request cap reached"), "daily cap names OpenRouter");
+});
+
+test("a repeated identical 401 restarts the window instead of letting it expire", async () => {
+  clearAuthState();
+  mkdirSync(piTypesafeDir(), { recursive: true, mode: 0o700 });
+  process.env.TYPESAFE_API_KEY = "offline-env-key-0123456789abcdef";
+  try {
+    const client = createTypeSafe({ apiKey: "test-key", fetch: async () => Response.json({ error: { message: "invalid key" } }, { status: 401 }) });
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    // Time passes: the stored rejection is older than the window, and the key still fails on the next call.
+    const expired = new Date(Date.now() - AUTH_REJECTION_TTL_MS - 60_000).toISOString();
+    writeFileSync(authStatePath(), JSON.stringify({ version: 1, lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401. Check TYPESAFE_API_KEY. No automatic retry was made.", at: expired } }));
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().usable, false, "the second refusal must restart the window");
+  } finally {
+    clearAuthState();
+    delete process.env.TYPESAFE_API_KEY;
   }
 });
 
@@ -525,4 +566,132 @@ test("key resolution picks the right env var per backend", () => {
     if (originalKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = originalKey;
     if (originalOR === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = originalOR;
   }
+});
+
+test("per-backend client failures do not contaminate another backend's auth state", async () => {
+  const savedTs = process.env.TYPESAFE_API_KEY;
+  const savedOr = process.env.OPENROUTER_API_KEY;
+  process.env.TYPESAFE_API_KEY = "ts-test-key-1234567890123456";
+  process.env.OPENROUTER_API_KEY = "or-test-key-1234567890123456";
+  clearAuthState();
+  try {
+    const tsClient = createTypeSafe({ backend: "typesafe", fetch: async () => responseFor(sample().questions) });
+    await tsClient.evaluate(sample());
+    assert.equal(authState({ backend: "typesafe" }).status, "verified");
+
+    const orClient = createTypeSafe({ backend: "openrouter", fetch: async () => Response.json({ error: "bad key" }, { status: 401 }) });
+    await assert.rejects(orClient.evaluate(sample()), hasCode("http"));
+
+    const orState = authState({ backend: "openrouter" });
+    assert.equal(orState.status, "rejected");
+    assert.equal(orState.usable, false);
+
+    const tsState = authState({ backend: "typesafe" });
+    assert.equal(tsState.status, "verified");
+    assert.equal(tsState.usable, true);
+    assert.equal(tsState.verified, true);
+    assert.equal(tsState.lastFailure, undefined);
+  } finally {
+    clearAuthState();
+    if (savedTs === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTs;
+    if (savedOr === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = savedOr;
+  }
+});
+
+test("a single client instance recovers auth state on 200 -> 401 -> 200 and via key-verifying listModels", async () => {
+  const savedTs = process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_API_KEY = "ts-test-key-1234567890123456";
+  clearAuthState();
+  try {
+    let mode: "ok" | "reject" = "ok";
+    const client = createTypeSafe({
+      backend: "typesafe",
+      fetch: async (url) => {
+        if (String(url).endsWith("/models")) return Response.json({ models: [{ name: "jev-latest" }] });
+        if (mode === "reject") return Response.json({ error: "bad key" }, { status: 401 });
+        return responseFor(sample().questions);
+      },
+    });
+
+    await client.evaluate(sample());
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().lastFailure, undefined);
+
+    mode = "reject";
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().status, "rejected");
+    assert.equal(authState().usable, false);
+    assert.equal(authState().lastFailure?.status, 401);
+
+    mode = "ok";
+    await client.evaluate(sample());
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().usable, true);
+    assert.equal(authState().verified, true);
+    assert.equal(authState().lastFailure, undefined);
+
+    // Same recovery via a key-verifying listModels() after a degradation on the same client.
+    mode = "reject";
+    await assert.rejects(client.evaluate(sample()), hasCode("http"));
+    assert.equal(authState().status, "rejected");
+    await client.listModels();
+    assert.equal(authState().status, "verified");
+    assert.equal(authState().lastFailure, undefined);
+  } finally {
+    clearAuthState();
+    if (savedTs === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedTs;
+  }
+});
+
+test("getSpend reports explicit BudgetState and never masks a reached daily cap", async () => {
+  const freshLedger = () => openUsageLedger({ path: join(mkdtempSync(join(tmpdir(), "pi-typesafe-budget-state-")), "usage.json") });
+
+  // Session cap only: within_budget -> session_cap_reached
+  const sessionOnly = createTypeSafe({ apiKey: "test-key", maxRequests: 1, ledger: freshLedger(), fetch: async () => responseFor(sample().questions) });
+  assert.deepEqual(sessionOnly.getSpend().budget, { status: "within_budget", remainingRequests: 1 });
+  assert.equal(sessionOnly.getSpend().blocked, undefined);
+  await sessionOnly.evaluate(sample());
+  assert.deepEqual(sessionOnly.getSpend().budget, { status: "session_cap_reached", used: 1, limit: 1 });
+  assert.equal(sessionOnly.getSpend().blocked, undefined);
+
+  // Both session cap and daily cap reached: daily blocked is NOT masked and budget reports daily_cap_reached.
+  const both = createTypeSafe({ apiKey: "test-key", maxRequests: 1, maxRequestsPerDay: 1, ledger: freshLedger(), fetch: async () => responseFor(sample().questions) });
+  await both.evaluate(sample());
+  const spend = both.getSpend();
+  assert.equal(spend.blocked?.cap, "requestsPerDay");
+  assert.equal(spend.blocked?.used, 1);
+  assert.equal(spend.blocked?.limit, 1);
+  assert.deepEqual(spend.budget, { status: "daily_cap_reached", blocked: spend.blocked });
+});
+
+test("attempt accounting preserves requestsStarted === requestsSucceeded + requestsFailed across outcomes", async () => {
+  const ledger = openUsageLedger({ path: join(mkdtempSync(join(tmpdir(), "pi-typesafe-attempt-")), "usage.json") });
+  let step = 0;
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    ledger,
+    fetch: async () => {
+      step += 1;
+      if (step === 1) return responseFor(sample().questions);
+      if (step === 2) return Response.json({ error: "fail" }, { status: 500 });
+      return Response.json({ malformed: true });
+    },
+  });
+  await client.evaluate(sample());
+  await assert.rejects(client.evaluate(sample()), hasCode("http"));
+  await assert.rejects(client.evaluate(sample()), hasCode("response"));
+  // Pre-submission failures never start an attempt.
+  await assert.rejects(client.evaluate(sample(), { signal: AbortSignal.abort() }), hasCode("aborted"));
+
+  const usage = client.getUsage();
+  assert.equal(usage.requestsStarted, 3);
+  assert.equal(usage.requestsSucceeded, 1);
+  assert.equal(usage.requestsFailed, 2);
+  assert.equal(usage.requestsStarted, usage.requestsSucceeded + usage.requestsFailed);
+
+  const today = client.getSpend().today;
+  assert.equal(today.requestsStarted, 3);
+  assert.equal(today.requestsSucceeded, 1);
+  assert.equal(today.requestsFailed, 2);
+  assert.equal(today.requestsStarted, today.requestsSucceeded + today.requestsFailed);
 });

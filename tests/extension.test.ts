@@ -7,7 +7,16 @@ import { after, before, test } from "node:test";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Extension, RegisteredCommand, RegisteredTool } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { clearStoredApiKey, parseEvaluationRequest, storeApiKey } from "../src/index.js";
+import { authState, authStatePath, clearAuthState, clearStoredApiKey, parseEvaluationRequest, storeApiKey } from "../src/index.js";
+import type { AuthState, SpendReport } from "../src/index.js";
+import {
+  deriveSessionReadiness,
+  initialConsent,
+  resolveSessionRoute,
+  transitionCallout,
+  transitionConsent,
+} from "../src/extension.js";
+import type { CalloutEvent, CalloutState, ConsentEvent, ConsentState } from "../src/extension.js";
 
 let temporary: string;
 let extension: Extension;
@@ -229,20 +238,20 @@ test("new sessions reset opt-in; headless opt-in is explicit", async () => {
   assert.ok(notices.at(-1)?.includes("1/20 attempts"));
 });
 
-test("an enabled session with no key announces that judgments are skipped", async () => {
+test("an enabled session with no key announces that judgments will fail", async () => {
   delete process.env.TYPESAFE_API_KEY;
   process.env.PI_TYPESAFE_ENABLED = "1";
   const handlers = extension.handlers.get("session_start") ?? [];
   const before = notices.length;
   for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
   const said = notices.slice(before).join("\n");
-  assert.ok(said.includes("judgments are skipped"));
+  assert.ok(said.includes("judgments will fail"));
   assert.ok(said.includes("TypeSafe key: missing"));
   // A key that appears later silences the next startup notice.
   process.env.TYPESAFE_API_KEY = "offline-test-key";
   const again = notices.length;
   for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "reload" }, ctx]);
-  assert.equal(notices.slice(again).some(text => text.includes("judgments are skipped")), false);
+  assert.equal(notices.slice(again).some(text => text.includes("judgments will fail")), false);
 });
 
 test("a rejected key is called out once per session and shows up in status", async () => {
@@ -258,12 +267,37 @@ test("a rejected key is called out once per session and shows up in status", asy
   } finally {
     globalThis.fetch = offlineStub;
   }
-  // Two failed calls, one callout: the reason is loud once, not once per call.
-  assert.equal(notices.slice(before).filter(text => text.includes("not authenticated")).length, 1);
+  // Two failed calls, one callout, and it describes the rejected key rather than claiming a dead session.
+  assert.equal(notices.slice(before).filter(text => text.includes("was rejected")).length, 1);
   await runCommand("status");
   assert.ok(notices.at(-1)?.includes("was rejected"));
   assert.ok(notices.at(-1)?.includes("Today "));
   assert.ok(notices.at(-1)?.includes("failed"));
+});
+
+test("a 403 is one refused request, never a dead key", async () => {
+  clearAuthState();
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  // The key was accepted before this session met the refusal.
+  await runTool();
+  const before = notices.length;
+  const offlineStub = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ error: { message: "daily cap" } }, { status: 403 });
+  try {
+    await assert.rejects(runTool(), /HTTP 403/);
+  } finally {
+    globalThis.fetch = offlineStub;
+  }
+  assert.deepEqual(notices.slice(before), [], "one refused request is not a session-level degradation");
+  const state = authState();
+  assert.equal(state.usable, true);
+  assert.equal(state.verified, true);
+  assert.equal(state.lastFailure?.status, 403);
+  await runCommand("status");
+  assert.ok(notices.at(-1)?.includes("HTTP 403"), "status still shows the refused request");
+  assert.equal(notices.at(-1)?.includes("was rejected"), false);
 });
 
 test("the registered tool admits the same near-miss aliases as the library", async () => {
@@ -313,6 +347,7 @@ async function withFetch(
   replacement: (input: unknown, init?: { body?: unknown }) => Promise<Response>,
   body: (requests: string[], bodies: string[]) => Promise<void>,
 ): Promise<void> {
+  const previous = globalThis.fetch;
   const requests: string[] = [];
   const bodies: string[] = [];
   globalThis.fetch = async (input, init) => {
@@ -323,7 +358,7 @@ async function withFetch(
   try {
     await body(requests, bodies);
   } finally {
-    globalThis.fetch = originalFetch;
+    globalThis.fetch = previous;
   }
 }
 
@@ -574,4 +609,250 @@ test("an unreported token count is named in the result, not printed as null", as
     assert.ok(text.includes("not reported input / not reported output tokens"), text);
     assert.equal(text.includes("null"), false, text);
   });
+});
+
+test("invalid PI_TYPESAFE_BACKEND declines enable, setup, test, and playground without defaulting to api.typesafe.ai", async () => {
+  const savedEnvKey = process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_API_KEY = "offline-test-key";
+  process.env.PI_TYPESAFE_BACKEND = "open-router";
+  try {
+    const scoped = await reloadExtension();
+    const run = (args: string) => Reflect.apply(scoped.command.handler, scoped.command, [args, ctx]);
+    let prompts = 0;
+    let edits = 0;
+    const savedCustom = ui.custom;
+    const savedEditor = ui.editor;
+    ui.custom = async () => { prompts++; return undefined; };
+    ui.editor = async () => { edits++; return undefined; };
+    try {
+      await withFetch(async () => { throw new Error("invalid backend must never send a request"); }, async requests => {
+        const beforeConfirms = confirmations;
+        for (const action of ["enable", "setup", "test", "playground"] as const) {
+          await run(action);
+          const message = notices.at(-1) ?? "";
+          assert.ok(message.includes("PI_TYPESAFE_BACKEND"), `${action}: ${message}`);
+          assert.ok(message.includes('Unknown judgment backend "open-router"'), `${action}: ${message}`);
+          assert.equal(message.includes("api.typesafe.ai"), false, `${action}: ${message}`);
+        }
+        assert.equal(confirmations, beforeConfirms, "must never show api.typesafe.ai consent dialog");
+        assert.equal(prompts, 0, "must never prompt for a key on an invalid backend");
+        assert.equal(edits, 0, "must never open playground editor on an invalid backend");
+        assert.deepEqual(requests, [], "must never contact any host");
+      });
+    } finally {
+      ui.custom = savedCustom;
+      ui.editor = savedEditor;
+    }
+  } finally {
+    delete process.env.PI_TYPESAFE_BACKEND;
+    if (savedEnvKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedEnvKey;
+  }
+});
+
+test("CalloutState resets on recovery (successful evaluate or active login) and calls out a second 401 degradation", async () => {
+  const savedEnvKey = process.env.TYPESAFE_API_KEY;
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  process.env.TYPESAFE_API_KEY = "offline-test-key";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+
+  // Path 1: 401 -> 200 recovery -> second 401 in the same session.
+  const beforeSuccessRecovery = notices.length;
+  let mode: "401" | "200" = "401";
+  const offlineStub = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/v1/models")) {
+      return Response.json({ models: [{ name: "jev-latest", description: "", release_date: "2026-01-01" }] });
+    }
+    if (mode === "401") return Response.json({ error: { message: "invalid key" } }, { status: 401 });
+    return Response.json({ model: "jev-test", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 12, output_tokens: 0 } });
+  };
+  try {
+    await assert.rejects(runTool(), /HTTP 401/);
+    await assert.rejects(runTool(), /HTTP 401/);
+    assert.equal(notices.slice(beforeSuccessRecovery).filter(text => text.includes("was rejected")).length, 1);
+
+    mode = "200";
+    await runTool();
+
+    mode = "401";
+    await assert.rejects(runTool(), /HTTP 401/);
+    assert.equal(notices.slice(beforeSuccessRecovery).filter(text => text.includes("was rejected")).length, 2, "second degradation after 200 recovery must call out again");
+
+    // Path 2: recovery via active /typesafe login -> second 401 calls out again.
+    delete process.env.TYPESAFE_API_KEY;
+    customResult = "ts_live_key_0123456789abcdef";
+    await runCommand("login");
+    assert.ok(notices.at(-1)?.includes("TypeSafe key verified"));
+
+    const beforeLoginRecovery = notices.length;
+    await assert.rejects(runTool(), /HTTP 401/);
+    assert.equal(notices.slice(beforeLoginRecovery).filter(text => text.includes("was rejected")).length, 1, "degradation after active login recovery must call out again");
+  } finally {
+    globalThis.fetch = offlineStub;
+    clearStoredApiKey();
+    if (savedEnvKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedEnvKey;
+  }
+});
+
+test("logging out a non-active backend leaves the active backend auth-state.json and session untouched", async () => {
+  const savedEnvKey = process.env.TYPESAFE_API_KEY;
+  delete process.env.TYPESAFE_API_KEY;
+  clearAuthState();
+  clearStoredApiKey();
+  storeApiKey("ts_live_key_0123456789abcdef", "typesafe");
+  storeApiKey("sk-or-0123456789abcdef", "openrouter");
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  const handlers = extension.handlers.get("session_start") ?? [];
+  for (const handler of handlers) await Reflect.apply(handler, extension, [{ reason: "startup" }, ctx]);
+  try {
+    await withFetch(async () => Response.json({ model: "jev-test", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 12, output_tokens: 0 } }), async () => {
+      await runTool();
+      assert.equal(existsSync(authStatePath()), true, "active backend wrote auth-state.json");
+      assert.equal(authState({ backend: "typesafe" }).verified, true);
+      const beforeAuthFile = readFileSync(authStatePath(), "utf8");
+
+      await runCommand("logout openrouter");
+      assert.equal(existsSync(authStatePath()), true, "logging out openrouter must not delete active TypeSafe auth-state.json");
+      assert.equal(readFileSync(authStatePath(), "utf8"), beforeAuthFile);
+      assert.equal(authState({ backend: "typesafe" }).verified, true);
+      await runCommand("status");
+      assert.ok(notices.at(-1)?.includes("TypeSafe: enabled."), notices.at(-1));
+      assert.ok(notices.at(-1)?.includes("1/20 attempts"), notices.at(-1));
+    });
+  } finally {
+    clearStoredApiKey();
+    clearAuthState();
+    if (savedEnvKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = savedEnvKey;
+  }
+});
+
+test("status and setup surface an exhausted session attempt cap", async () => {
+  process.env.PI_TYPESAFE_ENABLED = "1";
+  process.env.TYPESAFE_API_KEY = "offline-test-key";
+  const scoped = await reloadExtension();
+  const runScoped = (args: string) => Reflect.apply(scoped.command.handler, scoped.command, [args, ctx]);
+  const offlineStub = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ model: "jev-test", answers: { yes: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 5, output_tokens: 0 } });
+  try {
+    for (let i = 0; i < 20; i++) await runScopedTool(scoped.tool);
+    await runScoped("status");
+    const statusLine = notices.at(-1) ?? "";
+    assert.ok(statusLine.includes("20/20 attempts"), statusLine);
+    assert.ok(statusLine.includes("Session cap reached: 20/20"), statusLine);
+    await runScoped("setup");
+    const setupLine = notices.at(-1) ?? "";
+    assert.ok(setupLine.includes("Key configured via TYPESAFE_API_KEY."), setupLine);
+    assert.ok(setupLine.includes("Session cap reached: 20/20"), setupLine);
+  } finally {
+    globalThis.fetch = offlineStub;
+  }
+});
+
+test("SessionRoute, ConsentState, CalloutState, and SessionReadiness transition tables are closed", () => {
+  const routeCases: Array<{ env: NodeJS.ProcessEnv; status: "valid" | "invalid"; backend?: string; sentModel?: string; namesModel?: boolean }> = [
+    { env: {}, status: "valid", backend: "typesafe", sentModel: "jev-latest", namesModel: false },
+    { env: { PI_TYPESAFE_MODEL: "jev-1.14" }, status: "valid", backend: "typesafe", sentModel: "jev-1.14", namesModel: true },
+    { env: { PI_TYPESAFE_BACKEND: "openrouter" }, status: "valid", backend: "openrouter", sentModel: "typesafe/jev-1.13", namesModel: true },
+    { env: { PI_TYPESAFE_BACKEND: "openrouter", PI_TYPESAFE_MODEL: "jev-latest" }, status: "valid", backend: "openrouter", sentModel: "~typesafe/jev-latest", namesModel: true },
+    { env: { PI_TYPESAFE_BACKEND: "open-router" }, status: "invalid" },
+    { env: { PI_TYPESAFE_BACKEND: "toString" }, status: "invalid" },
+  ];
+  for (const row of routeCases) {
+    const route = resolveSessionRoute(row.env);
+    assert.equal(route.status, row.status);
+    if (route.status === "valid") {
+      assert.equal(route.backend, row.backend);
+      assert.equal(route.sentModel, row.sentModel);
+      assert.equal(route.consent.namesModel, row.namesModel);
+    } else {
+      assert.equal("backend" in route, false);
+      assert.ok(route.error.includes("Unknown judgment backend"));
+    }
+  }
+
+  assert.deepEqual(initialConsent({}), { status: "disabled" });
+  assert.deepEqual(initialConsent({ PI_TYPESAFE_ENABLED: "1" }), { status: "enabled", source: "environment" });
+  const consentStates: ConsentState[] = [
+    { status: "disabled" },
+    { status: "enabled", source: "environment" },
+    { status: "enabled", source: "command" },
+  ];
+  const consentEvents: Array<{ event: ConsentEvent; expected: (s: ConsentState) => ConsentState }> = [
+    { event: { type: "session_start", envEnabled: false }, expected: () => ({ status: "disabled" }) },
+    { event: { type: "session_start", envEnabled: true }, expected: () => ({ status: "enabled", source: "environment" }) },
+    { event: { type: "enable" }, expected: () => ({ status: "enabled", source: "command" }) },
+    { event: { type: "disable" }, expected: () => ({ status: "disabled" }) },
+    { event: { type: "logout", isActive: true, hasEnvKey: false }, expected: () => ({ status: "disabled" }) },
+    { event: { type: "logout", isActive: true, hasEnvKey: true }, expected: s => s },
+    { event: { type: "logout", isActive: false, hasEnvKey: false }, expected: s => s },
+    { event: { type: "logout", isActive: false, hasEnvKey: true }, expected: s => s },
+  ];
+  for (const state of consentStates) {
+    for (const { event, expected } of consentEvents) {
+      assert.deepEqual(transitionConsent(state, event), expected(state));
+    }
+  }
+
+  const calloutCases: Array<{ state: CalloutState; event: CalloutEvent; next: CalloutState; emit: boolean }> = [
+    { state: { status: "healthy" }, event: { type: "degrade", key: "run:http:401" }, next: { status: "degraded", key: "run:http:401" }, emit: true },
+    { state: { status: "degraded", key: "run:http:401" }, event: { type: "degrade", key: "run:http:401" }, next: { status: "degraded", key: "run:http:401" }, emit: false },
+    { state: { status: "degraded", key: "run:http:401" }, event: { type: "degrade", key: "run:configuration" }, next: { status: "degraded", key: "run:configuration" }, emit: true },
+    { state: { status: "degraded", key: "run:http:401" }, event: { type: "session_start" }, next: { status: "healthy" }, emit: false },
+    { state: { status: "degraded", key: "run:http:401" }, event: { type: "login_succeeded" }, next: { status: "healthy" }, emit: false },
+    { state: { status: "degraded", key: "run:http:401" }, event: { type: "evaluate_succeeded" }, next: { status: "healthy" }, emit: false },
+    { state: { status: "healthy" }, event: { type: "evaluate_succeeded" }, next: { status: "healthy" }, emit: false },
+  ];
+  for (const row of calloutCases) {
+    assert.deepEqual(transitionCallout(row.state, row.event), { state: row.next, emit: row.emit });
+  }
+
+  const validRoute = resolveSessionRoute({});
+  const invalidRoute = resolveSessionRoute({ PI_TYPESAFE_BACKEND: "open-router" });
+  const okAuth: AuthState = { backend: "typesafe", status: "verified", kind: "environment", source: "environment", path: "/fake/auth.json", keyName: "TYPESAFE_API_KEY", verified: true, usable: true };
+  const missingAuth: AuthState = { backend: "typesafe", status: "missing", kind: "missing", path: "/fake/auth.json", keyName: "no key", verified: false, usable: false };
+  const rejectedAuth: AuthState = {
+    ...okAuth,
+    status: "rejected",
+    verified: false,
+    usable: false,
+    lastFailure: { code: "http", status: 401, message: "TypeSafe returned HTTP 401.", at: new Date().toISOString() },
+  };
+  const baseSpend: SpendReport = {
+    session: { requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 },
+    today: { day: "2026-11-21", requestsStarted: 0, requestsSucceeded: 0, requestsFailed: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 },
+    caps: { maxRequests: 20 },
+    usdPerMTok: 0.042,
+    budget: { status: "within_budget", remainingRequests: 20 },
+  };
+  const sessionCappedSpend: SpendReport = {
+    ...baseSpend,
+    session: { ...baseSpend.session, requestsStarted: 20 },
+    budget: { status: "session_cap_reached", used: 20, limit: 20 },
+  };
+  const dailyBlocked = { cap: "requestsPerDay" as const, limit: 10, used: 10, day: "2026-11-21" };
+  const dailyCappedSpend: SpendReport = {
+    ...baseSpend,
+    blocked: dailyBlocked,
+    budget: { status: "daily_cap_reached", blocked: dailyBlocked },
+  };
+
+  const readinessCases: Array<{ input: Parameters<typeof deriveSessionReadiness>[0]; status: ReturnType<typeof deriveSessionReadiness>["status"]; budgetReason?: "session_cap" | "daily_cap" }> = [
+    { input: { route: invalidRoute, consent: { status: "disabled" } }, status: "invalid_backend" },
+    { input: { route: invalidRoute, consent: { status: "enabled", source: "environment" } }, status: "invalid_backend" },
+    { input: { route: validRoute, consent: { status: "disabled" }, auth: okAuth }, status: "disabled" },
+    { input: { route: validRoute, consent: { status: "disabled" }, auth: okAuth, spend: sessionCappedSpend }, status: "disabled", budgetReason: "session_cap" },
+    { input: { route: validRoute, consent: { status: "enabled", source: "command" }, auth: missingAuth }, status: "blocked_auth" },
+    { input: { route: validRoute, consent: { status: "enabled", source: "command" }, auth: rejectedAuth }, status: "blocked_auth" },
+    { input: { route: validRoute, consent: { status: "enabled", source: "command" }, auth: okAuth, spend: sessionCappedSpend }, status: "blocked_budget", budgetReason: "session_cap" },
+    { input: { route: validRoute, consent: { status: "enabled", source: "command" }, auth: okAuth, spend: dailyCappedSpend }, status: "blocked_budget", budgetReason: "daily_cap" },
+    { input: { route: validRoute, consent: { status: "enabled", source: "command" }, auth: okAuth, spend: baseSpend }, status: "ready" },
+  ];
+  for (const row of readinessCases) {
+    const readiness = deriveSessionReadiness(row.input);
+    assert.equal(readiness.status, row.status);
+    if (row.budgetReason !== undefined) {
+      assert.ok("budget" in readiness && readiness.budget?.reason === row.budgetReason);
+    }
+  }
 });

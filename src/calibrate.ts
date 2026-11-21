@@ -110,26 +110,51 @@ export function defaultThresholds(samples: readonly ScoredSample[], limit = 64):
   return Array.from({ length: limit }, (_, index) => distinct[Math.round(index * step)] as number);
 }
 
+/** Mode for selecting a threshold: best F1 when no floors are given, or the lowest threshold clearing requested floors. */
+export type ThresholdSelection =
+  | { readonly mode: "best_f1" }
+  | { readonly mode: "floors"; readonly minPrecision?: number; readonly minRecall?: number };
+
+function resolveThresholdSelection(
+  options: ThresholdSelection | { readonly minPrecision?: number; readonly minRecall?: number },
+): ThresholdSelection {
+  if ("mode" in options) return options;
+  if (options.minPrecision === undefined && options.minRecall === undefined) return { mode: "best_f1" };
+  return {
+    mode: "floors",
+    ...(options.minPrecision === undefined ? {} : { minPrecision: options.minPrecision }),
+    ...(options.minRecall === undefined ? {} : { minRecall: options.minRecall }),
+  };
+}
+
 /**
  * The lowest threshold that clears the precision and recall floors. With no floors, the best F1 among the rows;
  * undefined when nothing clears them.
  */
-export function pickThreshold(rows: readonly ThresholdRow[], options: { minPrecision?: number; minRecall?: number } = {}): ThresholdRow | undefined {
-  const { minPrecision, minRecall } = options;
-  if (minPrecision === undefined && minRecall === undefined) {
-    let best: ThresholdRow | undefined;
-    let bestF1 = -1;
-    for (const row of rows) {
-      if (row.precision === undefined || row.recall === undefined) continue;
-      const f1 = row.precision + row.recall === 0 ? 0 : 2 * row.precision * row.recall / (row.precision + row.recall);
-      if (f1 > bestF1) { bestF1 = f1; best = row; }
+export function pickThreshold(
+  rows: readonly ThresholdRow[],
+  options: ThresholdSelection | { readonly minPrecision?: number; readonly minRecall?: number } = {},
+): ThresholdRow | undefined {
+  const selection = resolveThresholdSelection(options);
+  switch (selection.mode) {
+    case "best_f1": {
+      let best: ThresholdRow | undefined;
+      let bestF1 = -1;
+      for (const row of rows) {
+        if (row.precision === undefined || row.recall === undefined) continue;
+        const f1 = row.precision + row.recall === 0 ? 0 : 2 * row.precision * row.recall / (row.precision + row.recall);
+        if (f1 > bestF1) { bestF1 = f1; best = row; }
+      }
+      return best;
     }
-    return best;
+    case "floors": {
+      const { minPrecision, minRecall } = selection;
+      const candidates = rows
+        .filter(row => (minPrecision === undefined || (row.precision ?? 0) >= minPrecision) && (minRecall === undefined || (row.recall ?? 0) >= minRecall))
+        .sort((a, b) => a.threshold - b.threshold);
+      return candidates[0];
+    }
   }
-  const candidates = rows
-    .filter(row => (minPrecision === undefined || (row.precision ?? 0) >= minPrecision) && (minRecall === undefined || (row.recall ?? 0) >= minRecall))
-    .sort((a, b) => a.threshold - b.threshold);
-  return candidates[0];
 }
 
 /** Label, score, and read the numbers: AUC, the threshold sweep, and one recommendation. */
@@ -184,17 +209,40 @@ export interface ReplayCase<T> {
   readonly data: T;
 }
 
-export interface ReplayResult<T> {
-  readonly id: string;
-  readonly label: boolean;
-  readonly data: T;
-  /** The judge's number, absent when the case could not be scored. */
-  readonly score?: number;
-  /** The failure message, absent on success. Carries no upstream body. */
-  readonly error?: string;
-  /** True when the case was never submitted (abort or a stopped batch). */
-  readonly skipped: boolean;
-}
+/** Terminal state of one replayed calibration case. */
+export type ReplayStatus = "scored" | "failed" | "skipped";
+
+export type ReplayResult<T> =
+  | {
+      readonly status: "scored";
+      readonly id: string;
+      readonly label: boolean;
+      readonly data: T;
+      /** The judge's finite number. */
+      readonly score: number;
+      readonly skipped: false;
+      readonly error?: undefined;
+    }
+  | {
+      readonly status: "failed";
+      readonly id: string;
+      readonly label: boolean;
+      readonly data: T;
+      /** The failure message. Carries no upstream body. */
+      readonly error: string;
+      readonly skipped: false;
+      readonly score?: undefined;
+    }
+  | {
+      readonly status: "skipped";
+      readonly id: string;
+      readonly label: boolean;
+      readonly data: T;
+      /** The skip message. Carries no upstream body. */
+      readonly error: string;
+      readonly skipped: true;
+      readonly score?: undefined;
+    };
 
 export interface ReplayOptions {
   /** Cases in flight at once. Default: DEFAULT_CONCURRENCY (4). */
@@ -204,6 +252,30 @@ export interface ReplayOptions {
   stopOn?: (error: unknown) => boolean;
   /** Turns a thrown scorer error into the reported message. Default: the error's own message. */
   describeError?: (error: unknown) => string;
+}
+
+const NON_FINITE_SCORE_MESSAGE = "The scorer returned a non-finite score.";
+
+function describeReplayError(error: unknown, describeError?: (error: unknown) => string): string {
+  if (describeError) return describeError(error);
+  return error instanceof Error ? error.message : "The scorer failed.";
+}
+
+function settleReplayCase<T>(item: ReplayCase<T>, result: Settled<number>, describeError?: (error: unknown) => string): ReplayResult<T> {
+  switch (result.status) {
+    case "succeeded": {
+      if (Number.isFinite(result.value)) {
+        return { status: "scored", id: item.id, label: item.label, data: item.data, score: result.value, skipped: false };
+      }
+      // Reject NaN/Infinity at the replay boundary instead of carrying an invalid score downstream.
+      const error = describeReplayError(new RangeError(NON_FINITE_SCORE_MESSAGE), describeError);
+      return { status: "failed", id: item.id, label: item.label, data: item.data, error, skipped: false };
+    }
+    case "failed":
+      return { status: "failed", id: item.id, label: item.label, data: item.data, error: describeReplayError(result.error, describeError), skipped: false };
+    case "skipped":
+      return { status: "skipped", id: item.id, label: item.label, data: item.data, error: describeReplayError(result.error, describeError), skipped: true };
+  }
 }
 
 /**
@@ -217,12 +289,7 @@ export async function replay<T>(cases: readonly ReplayCase<T>[], score: (data: T
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.stopOn === undefined ? {} : { stopOn: options.stopOn }),
   });
-  return settled.map((result, index) => {
-    const item = cases[index] as ReplayCase<T>;
-    if (result.ok) return { id: item.id, label: item.label, data: item.data, score: result.value, skipped: false };
-    const error = options.describeError ? options.describeError(result.error) : result.error instanceof Error ? result.error.message : "The scorer failed.";
-    return { id: item.id, label: item.label, data: item.data, error, skipped: result.skipped };
-  });
+  return settled.map((result, index) => settleReplayCase(cases[index] as ReplayCase<T>, result, options.describeError));
 }
 
 /** The scored cases of a replay, in replay order. Unscored cases are excluded and counted as errors. */
@@ -230,7 +297,10 @@ export function samplesOf<T>(results: readonly ReplayResult<T>[]): { samples: Sc
   const samples: ScoredSample[] = [];
   let errors = 0;
   for (const result of results) {
-    if (result.score === undefined || !Number.isFinite(result.score)) { errors++; continue; }
+    if (result.status === "failed" || result.status === "skipped" || result.score === undefined || !Number.isFinite(result.score)) {
+      errors++;
+      continue;
+    }
     samples.push({ label: result.label, score: result.score, id: result.id });
   }
   return { samples, errors };

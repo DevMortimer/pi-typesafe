@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   auc, calibrate, defaultThresholds, formatCalibration, metricsAt, pickThreshold, replay, samplesOf, sweep,
 } from "../src/calibrate.js";
+import type { ReplayResult, ReplayStatus, ThresholdSelection } from "../src/calibrate.js";
 import { TypeSafeIntegrationError } from "../src/errors.js";
 
 const sample = (score: number, label: boolean, id?: string) => ({ score, label, ...(id === undefined ? {} : { id }) });
@@ -141,4 +142,87 @@ test("replay reports scorer failures with the caller's own message", async () =>
   assert.equal(described[0]?.error, "The scorer failed.");
   const nonError = await replay([{ id: "boom", label: false, data: "case" }], async () => { throw "not an error"; });
   assert.equal(nonError[0]?.error, "The scorer failed.");
+});
+
+test("replay state machine transitions scored, failed (including non-finite), and skipped cases", async () => {
+  const describeReplay = <T>(item: ReplayResult<T>): ReplayStatus => {
+    switch (item.status) {
+      case "scored":
+        assert.equal(typeof item.score, "number");
+        assert.equal(item.skipped, false);
+        assert.equal(item.error, undefined);
+        return item.status;
+      case "failed":
+        assert.equal(item.score, undefined);
+        assert.equal(item.skipped, false);
+        assert.equal(typeof item.error, "string");
+        return item.status;
+      case "skipped":
+        assert.equal(item.score, undefined);
+        assert.equal(item.skipped, true);
+        assert.equal(typeof item.error, "string");
+        return item.status;
+    }
+  };
+
+  const cases = [
+    { id: "finite", label: true, data: "finite" },
+    { id: "nan", label: false, data: "nan" },
+    { id: "inf", label: true, data: "inf" },
+    { id: "ninf", label: false, data: "ninf" },
+    { id: "budget", label: true, data: "budget" },
+    { id: "unstarted", label: false, data: "unstarted" },
+  ] as const;
+
+  const results = await replay(cases, async kind => {
+    if (kind === "finite") return 0.8;
+    if (kind === "nan") return Number.NaN;
+    if (kind === "inf") return Number.POSITIVE_INFINITY;
+    if (kind === "ninf") return Number.NEGATIVE_INFINITY;
+    if (kind === "budget") throw new TypeSafeIntegrationError("budget", "cap reached");
+    return 0.1;
+  }, {
+    concurrency: 1,
+    stopOn: error => error instanceof TypeSafeIntegrationError && error.code === "budget",
+  });
+
+  assert.deepEqual(results.map(describeReplay), ["scored", "failed", "failed", "failed", "failed", "skipped"]);
+  assert.equal(results[0]?.score, 0.8);
+
+  for (const idx of [1, 2, 3]) {
+    const entry = results[idx];
+    assert.ok(entry && entry.status === "failed");
+    assert.equal(entry.error, "The scorer returned a non-finite score.");
+  }
+
+  assert.equal(results[4]?.error, "cap reached");
+  assert.ok(results[5]?.error?.includes("budget limit"));
+
+  const { samples, errors } = samplesOf(results);
+  assert.deepEqual(samples, [{ id: "finite", label: true, score: 0.8 }]);
+  assert.equal(errors, 5);
+
+  const customDescribed = await replay([{ id: "nan", label: true, data: null }], async () => Number.NaN, {
+    describeError: () => "custom non-finite message",
+  });
+  assert.equal(customDescribed[0]?.status, "failed");
+  assert.equal(customDescribed[0]?.score, undefined);
+  assert.equal(customDescribed[0]?.error, "custom non-finite message");
+
+  // samplesOf remains defensive against hand-built arrays carrying a non-finite score.
+  const handBuilt: ReplayResult<null>[] = [{ status: "scored", id: "bad", label: true, data: null, score: Number.NaN, skipped: false }];
+  assert.deepEqual(samplesOf(handBuilt), { samples: [], errors: 1 });
+});
+
+test("pickThreshold honours explicit ThresholdSelection modes and legacy floor options", () => {
+  const rows = sweep(muddy, [0.2, 0.4, 0.5, 0.6, 0.7]);
+  const selections: ReadonlyArray<{ selection: ThresholdSelection; expected: number | undefined }> = [
+    { selection: { mode: "best_f1" }, expected: 0.4 },
+    { selection: { mode: "floors", minPrecision: 0.75, minRecall: 0.5 }, expected: 0.6 },
+    { selection: { mode: "floors", minPrecision: 0.99 }, expected: undefined },
+    { selection: { mode: "floors" }, expected: 0.2 },
+  ];
+  for (const { selection, expected } of selections) {
+    assert.equal(pickThreshold(rows, selection)?.threshold, expected);
+  }
 });

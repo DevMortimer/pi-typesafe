@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { chunkEvaluationRequest, fanOut } from "../src/batch.js";
+import type { Settled, SettledStatus, SkipReason } from "../src/index.js";
 import { createTypeSafe } from "../src/client.js";
 import { TypeSafeIntegrationError } from "../src/errors.js";
 import { openUsageLedger } from "../src/usage.js";
@@ -183,4 +184,187 @@ test("an unreported token count adds nothing to the batch usage", async () => {
   assert.equal(batch.ok, true);
   assert.deepEqual(batch.usage, { input_tokens: 0, output_tokens: 0 });
   assert.equal(client.getSpend().today.inputTokens, 0);
+});
+
+test("fanOut state machine: first stop reason wins and Settled variants are exhaustive", async () => {
+  const describeSettled = (item: Settled<number>): SettledStatus => {
+    switch (item.status) {
+      case "succeeded":
+        assert.equal(item.ok, true);
+        return item.status;
+      case "failed":
+        assert.equal(item.ok, false);
+        assert.equal(item.skipped, false);
+        return item.status;
+      case "skipped": {
+        assert.equal(item.ok, false);
+        assert.equal(item.skipped, true);
+        const reason: SkipReason = item.skipReason;
+        assert.ok(reason === "aborted" || reason === "stopped");
+        return item.status;
+      }
+    }
+  };
+
+  type Case = {
+    name: string;
+    run: () => Promise<void>;
+  };
+  const cases: Case[] = [
+    {
+      name: "mixed succeeded and failed items carry explicit status tags",
+      run: async () => {
+        const results = await fanOut([10, 20, 30], async value => {
+          if (value === 20) throw new Error("transient");
+          return value;
+        }, { concurrency: 2 });
+        assert.deepEqual(results.map(describeSettled), ["succeeded", "failed", "succeeded"]);
+      },
+    },
+    {
+      name: "signal abort stamps skipReason aborted and code aborted",
+      run: async () => {
+        const controller = new AbortController();
+        controller.abort();
+        const results = await fanOut([0, 1], async value => value, { signal: controller.signal });
+        assert.deepEqual(results.map(describeSettled), ["skipped", "skipped"]);
+        for (const item of results) {
+          assert.equal(item.status, "skipped");
+          assert.equal(item.skipReason, "aborted");
+          assert.equal(item.error.code, "aborted");
+          assert.equal(item.error.message, "TypeSafe batch cancelled before this request was submitted.");
+        }
+      },
+    },
+    {
+      name: "budget stop stamps skipReason stopped and code budget",
+      run: async () => {
+        const results = await fanOut([0, 1, 2], async value => {
+          if (value === 1) throw new TypeSafeIntegrationError("budget", "cap reached");
+          return value;
+        }, { concurrency: 1, stopOn: error => error instanceof TypeSafeIntegrationError && error.code === "budget" });
+        assert.deepEqual(results.map(describeSettled), ["succeeded", "failed", "skipped"]);
+        const skipped = results[2];
+        assert.ok(skipped && skipped.status === "skipped");
+        assert.equal(skipped.skipReason, "stopped");
+        assert.equal(skipped.error.code, "budget");
+        assert.equal(skipped.error.message, "TypeSafe batch stopped after a budget limit was reached; this request was not submitted.");
+      },
+    },
+    {
+      name: "non-budget stop stamps skipReason stopped and code aborted",
+      run: async () => {
+        const results = await fanOut([0, 1], async value => {
+          if (value === 0) throw new Error("stop now");
+          return value;
+        }, { concurrency: 1, stopOn: () => true });
+        assert.deepEqual(results.map(describeSettled), ["failed", "skipped"]);
+        const skipped = results[1];
+        assert.ok(skipped && skipped.status === "skipped");
+        assert.equal(skipped.skipReason, "stopped");
+        assert.equal(skipped.error.code, "aborted");
+        assert.equal(skipped.error.message, "TypeSafe batch stopped after a failed request; this request was not submitted.");
+      },
+    },
+    {
+      name: "late signal abort during drain cannot overwrite a prior budget stop",
+      run: async () => {
+        const controller = new AbortController();
+        let releaseWorker1!: () => void;
+        const worker1Gate = new Promise<void>(resolve => {
+          releaseWorker1 = resolve;
+          setTimeout(resolve, 200);
+        });
+        const results = await fanOut([0, 1, 2], async value => {
+          if (value === 0) {
+            setTimeout(releaseWorker1, 5);
+            throw new TypeSafeIntegrationError("budget", "cap reached");
+          }
+          if (value === 1) {
+            await worker1Gate;
+            controller.abort();
+            return 1;
+          }
+          return value;
+        }, {
+          concurrency: 2,
+          signal: controller.signal,
+          stopOn: error => error instanceof TypeSafeIntegrationError && error.code === "budget",
+        });
+        assert.deepEqual(results.map(describeSettled), ["failed", "succeeded", "skipped"]);
+        const skipped = results[2];
+        assert.ok(skipped && skipped.status === "skipped");
+        assert.equal(skipped.skipReason, "stopped");
+        assert.equal(skipped.error.code, "budget");
+      },
+    },
+    {
+      name: "late budget error during drain cannot overwrite a prior signal abort",
+      run: async () => {
+        const controller = new AbortController();
+        let markWorker1Started!: () => void;
+        let releaseWorker1!: () => void;
+        const worker1Started = new Promise<void>(resolve => {
+          markWorker1Started = resolve;
+          setTimeout(resolve, 200);
+        });
+        const worker1Gate = new Promise<void>(resolve => {
+          releaseWorker1 = resolve;
+          setTimeout(resolve, 200);
+        });
+        const results = await fanOut([0, 1, 2], async value => {
+          if (value === 0) {
+            await worker1Started;
+            controller.abort();
+            releaseWorker1();
+            return 0;
+          }
+          if (value === 1) {
+            markWorker1Started();
+            await worker1Gate;
+            throw new TypeSafeIntegrationError("budget", "cap reached");
+          }
+          return value;
+        }, {
+          concurrency: 2,
+          signal: controller.signal,
+          stopOn: error => error instanceof TypeSafeIntegrationError && error.code === "budget",
+        });
+        assert.deepEqual(results.map(describeSettled), ["succeeded", "failed", "skipped"]);
+        const skipped = results[2];
+        assert.ok(skipped && skipped.status === "skipped");
+        assert.equal(skipped.skipReason, "aborted");
+        assert.equal(skipped.error.code, "aborted");
+      },
+    },
+  ];
+  for (const entry of cases) await entry.run();
+});
+
+test("evaluateMany keeps budget skipReason and error.code when signal aborts during drain", async () => {
+  const controller = new AbortController();
+  const counter = { calls: 0 };
+  const client = createTypeSafe({
+    maxRequests: 1,
+    ledger: ledgerFor("budget-then-abort"),
+    fetch: async (_url, init) => {
+      counter.calls++;
+      // Let the second concurrent evaluate() hit maxRequests: 1 first, then abort during drain.
+      await new Promise(resolve => setTimeout(resolve, 15));
+      controller.abort();
+      const request = JSON.parse(String(init?.body)) as SystemOneRequest<Questions>;
+      const answers = Object.fromEntries(Object.keys(request.questions).map(id => [id, { type: "noul", noul: 0.75 }]));
+      return Response.json({ model: "jev-test", answers, usage: { input_tokens: 10, output_tokens: 0 } });
+    },
+  });
+  const batch = await client.evaluateMany([sample, sample, sample], { concurrency: 2, signal: controller.signal });
+  assert.equal(counter.calls, 1);
+  assert.equal(batch.skipped, 1);
+  const failed = batch.results[1];
+  assert.ok(failed && failed.status === "failed");
+  assert.ok(failed.error instanceof TypeSafeIntegrationError && failed.error.code === "budget");
+  const skipped = batch.results[2];
+  assert.ok(skipped && skipped.status === "skipped");
+  assert.equal(skipped.skipReason, "stopped");
+  assert.equal(skipped.error.code, "budget");
 });
