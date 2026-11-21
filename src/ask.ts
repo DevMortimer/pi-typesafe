@@ -1,6 +1,6 @@
 import type { Questions, SystemOneRequest } from "@typesafe-ai/sdk";
 import type { Evaluation, TypeSafe } from "./client.js";
-import { TypeSafeIntegrationError } from "./errors.js";
+import { TypeSafeIntegrationError, attachErrorDisposition } from "./errors.js";
 import type { IntegrationErrorCode } from "./errors.js";
 
 /** Anything with pi-typesafe's `evaluate`: the real client in a session, a stub in tests. */
@@ -40,7 +40,11 @@ export async function ask<Q extends Questions>(judge: Judge, request: SystemOneR
     const result = await judge.evaluate(request, { signal });
     return { ok: true, answers: result.answers, model: result.model, usage: result.usage, elapsedMs: result.elapsedMs };
   } catch (error) {
-    if (error instanceof TypeSafeIntegrationError) return { ok: false, error: error.message, errorCode: error.code };
+    if (error instanceof TypeSafeIntegrationError) {
+      const failed: AskAnswer<Q> = { ok: false, error: error.message, errorCode: error.code };
+      attachErrorDisposition(failed, error.disposition);
+      return failed;
+    }
     return { ok: false, error: FALLBACK_MESSAGE };
   } finally {
     clearTimeout(timer);
