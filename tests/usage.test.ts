@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  DEFAULT_USD_PER_MTOK, LOCK_STALE_MS, LOCK_WAIT_MS, capsFromEnvironment, estimateUsd, localDay, mergeCaps, openUsageLedger, usagePath,
+  DEFAULT_USD_PER_MTOK, LOCK_STALE_MS, LOCK_WAIT_MS, capsFromEnvironment, emptyTotals, estimateUsd, localDay, mergeCaps, openUsageLedger, probeLock, takeLock, transitionDeltaBuffer, usagePath,
 } from "../src/usage.js";
 
 const workspace = mkdtempSync(join(tmpdir(), "pi-typesafe-usage-"));
@@ -220,4 +220,42 @@ test("a ledger file written before costs were recorded is still read and extende
   assert.equal(day.costedInputTokens, 500_000);
   // 1,000,000 old tokens at the ledger's rate plus the recorded 0.25.
   assert.equal(ledger.today().estimatedUsd, 1.25);
+});
+
+test("delta buffer and lock probe state machines cover every transition and outcome", () => {
+  // DeltaBufferState: synced -> buffered -> buffered (accumulated) -> buffered (rollover) -> synced.
+  const synced = { status: "synced" as const };
+  const d1 = transitionDeltaBuffer(synced, { type: "record", day: "2026-01-11", delta: { ...emptyTotals(), requestsStarted: 1 } });
+  assert.equal(d1.status, "buffered");
+  assert.equal(d1.pending["2026-01-11"]?.requestsStarted, 1);
+
+  const d2 = transitionDeltaBuffer(d1, { type: "record", day: "2026-01-11", delta: { ...emptyTotals(), requestsSucceeded: 1, inputTokens: 50 } });
+  assert.equal(d2.status, "buffered");
+  assert.equal(d2.pending["2026-01-11"]?.requestsStarted, 1);
+  assert.equal(d2.pending["2026-01-11"]?.requestsSucceeded, 1);
+  assert.equal(d2.pending["2026-01-11"]?.inputTokens, 50);
+
+  const d3 = transitionDeltaBuffer(d2, { type: "record", day: "2026-01-12", delta: { ...emptyTotals(), requestsFailed: 1 } });
+  assert.equal(d3.status, "buffered");
+  assert.equal(d3.pending["2026-01-11"]?.requestsStarted, 1);
+  assert.equal(d3.pending["2026-01-12"]?.requestsFailed, 1);
+
+  assert.deepEqual(transitionDeltaBuffer(d3, { type: "flushed" }), { status: "synced" });
+  assert.deepEqual(transitionDeltaBuffer(synced, { type: "flushed" }), { status: "synced" });
+
+  // LockProbe and LockOutcome: acquired, contended_active, contended_stale, timed_out, unavailable.
+  const lockPath = `${ledgerPath("lock-machine")}.lock`;
+  const first = probeLock(lockPath, Date.now());
+  assert.equal(first.status, "acquired");
+  assert.equal(probeLock(lockPath, Date.now()).status, "contended_active");
+  assert.equal(takeLock(lockPath).status, "timed_out");
+  assert.equal(probeLock(lockPath, Date.now() + LOCK_STALE_MS + 100).status, "contended_stale");
+  const afterStale = probeLock(lockPath, Date.now());
+  assert.equal(afterStale.status, "acquired");
+  afterStale.release();
+
+  // A parent path that is a regular file makes the lock unavailable without waiting.
+  const blocker = ledgerPath("not-a-dir");
+  writeFileSync(blocker, "file");
+  assert.equal(takeLock(join(blocker, "usage.json.lock")).status, "unavailable");
 });
