@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { promptForApiKey } from "../src/key-prompt.js";
+import { promptForApiKey, transitionKeyPrompt } from "../src/key-prompt.js";
+import type { KeyPromptEvent, KeyPromptState } from "../src/key-prompt.js";
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
@@ -54,4 +55,70 @@ test("the prompt names the backend whose key it asks for", async () => {
   }), "OpenRouter");
   assert.ok(screen.includes("OpenRouter API key"), screen);
   assert.equal(key, "");
+});
+
+test("KeyPrompt settles at most once and ignores trailing input after Enter or Escape", async () => {
+  const submitCalls: Array<string | undefined> = [];
+  let afterSubmitRender = "";
+  const submitCtx = {
+    hasUI: true,
+    ui: {
+      custom: async <T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown) =>
+        new Promise<T>(resolve => {
+          const component = factory({}, theme, {}, (value: T) => {
+            submitCalls.push(value as string | undefined);
+            resolve(value);
+          }) as { render(width: number): string[]; handleInput(data: string): void; focused: boolean };
+          component.focused = true;
+          for (const ch of "abc") component.handleInput(ch);
+          component.handleInput("\r");
+          // Trailing input, second Enter, and Escape after settlement must be ignored.
+          component.handleInput("z");
+          component.handleInput("\r");
+          component.handleInput("\x1b");
+          afterSubmitRender = component.render(60).join("\n");
+        }),
+      input: async () => { throw new Error("must not fall back"); },
+    },
+  } as unknown as ExtensionCommandContext;
+  assert.equal(await promptForApiKey(submitCtx), "abc");
+  assert.deepEqual(submitCalls, ["abc"]);
+  assert.equal(afterSubmitRender.includes("••••"), false, "post-submit keystroke must not mutate input");
+
+  const cancelCalls: Array<string | undefined> = [];
+  const cancelCtx = {
+    hasUI: true,
+    ui: {
+      custom: async <T>(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: T) => void) => unknown) =>
+        new Promise<T>(resolve => {
+          const component = factory({}, theme, {}, (value: T) => {
+            cancelCalls.push(value as string | undefined);
+            resolve(value);
+          }) as { render(width: number): string[]; handleInput(data: string): void; focused: boolean };
+          component.focused = true;
+          component.handleInput("a");
+          component.handleInput("\x1b");
+          component.handleInput("\x1b");
+          component.handleInput("b");
+          component.handleInput("\r");
+        }),
+      input: async () => { throw new Error("must not fall back"); },
+    },
+  } as unknown as ExtensionCommandContext;
+  assert.equal(await promptForApiKey(cancelCtx), undefined);
+  assert.deepEqual(cancelCalls, [undefined]);
+});
+
+test("transitionKeyPrompt table is closed across editing and terminal states", () => {
+  const cases: Array<{ state: KeyPromptState; event: KeyPromptEvent; next: KeyPromptState; settledNow: boolean }> = [
+    { state: { status: "editing" }, event: { type: "submit", value: "k1" }, next: { status: "submitted", value: "k1" }, settledNow: true },
+    { state: { status: "editing" }, event: { type: "cancel" }, next: { status: "cancelled" }, settledNow: true },
+    { state: { status: "submitted", value: "k1" }, event: { type: "submit", value: "k2" }, next: { status: "submitted", value: "k1" }, settledNow: false },
+    { state: { status: "submitted", value: "k1" }, event: { type: "cancel" }, next: { status: "submitted", value: "k1" }, settledNow: false },
+    { state: { status: "cancelled" }, event: { type: "submit", value: "k2" }, next: { status: "cancelled" }, settledNow: false },
+    { state: { status: "cancelled" }, event: { type: "cancel" }, next: { status: "cancelled" }, settledNow: false },
+  ];
+  for (const row of cases) {
+    assert.deepEqual(transitionKeyPrompt(row.state, row.event), { state: row.next, settledNow: row.settledNow });
+  }
 });
