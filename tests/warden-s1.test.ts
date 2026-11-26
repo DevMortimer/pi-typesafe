@@ -426,6 +426,38 @@ test("/typesafe model download reports completion with maker credit when already
   }
 });
 
+test("downloadWardenS1 verifies SHA-256 digests and writes warden_s1_ready.json into shared cache", async () => {
+  const { downloadWardenS1 } = await import("../src/index.js");
+  const fakeModelBytes = Buffer.from("synthetic-onnx-weights");
+  const fakeSha = createHash("sha256").update(fakeModelBytes).digest("hex");
+  const manifestJson = JSON.stringify({
+    files: [{ path: "model.onnx", bytes: fakeModelBytes.length, sha256: fakeSha }],
+  });
+  const progressEvents: number[] = [];
+  const res = await downloadWardenS1({ runtime: "onnx" }, {
+    hfBaseUrl: "https://hf.example.test",
+    fetch: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/onnx_manifest.json")) {
+        return new Response(manifestJson, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/model.onnx")) {
+        return new Response(fakeModelBytes, { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    },
+    ensureOrtRuntime: async () => join(agentDir, "pi-warden", "runtime", "node_modules", "onnxruntime-node"),
+    onProgress: (p) => { progressEvents.push(p.percent); },
+  });
+  assert.equal(res.runtime, "onnx");
+  assert.equal(res.files.length, 1);
+  assert.equal(res.files[0]?.sha256, fakeSha);
+  assert.ok(progressEvents.includes(100));
+  const statusAfter = getWardenS1Status({ runtime: "onnx" }, { refreshProbe: true });
+  assert.equal(statusAfter.ready, true);
+  assert.equal(statusAfter.state, "ready");
+});
+
 test("mock-weights loopback singleton daemon: cold-start spawn, typed answers, >64 KiB payload, $0 spend, and second client attach", async () => {
   process.env[MOCK_WEIGHTS_ENV] = "1";
   process.env.PI_TYPESAFE_BACKEND = "warden-s1";
