@@ -7,10 +7,13 @@ import type { BatchEvaluation, BatchOptions } from "./batch.js";
 import { evaluateAll, evaluateMany } from "./batch.js";
 import { keySituation } from "./credentials.js";
 import { TypeSafeIntegrationError, safeError } from "./errors.js";
-import { DEFAULT_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationRequest } from "./schema.js";
+import { MOCK_WEIGHTS_ENV, getWardenS1Status } from "./local-model.js";
+import { DEFAULT_MAX_INPUT_BYTES, LOCAL_MAX_INPUT_BYTES, assertWithinByteLimit, prepareEvaluationRequest } from "./schema.js";
 import type { BackendLimits } from "./schema.js";
 import { DEFAULT_USD_PER_MTOK, capsFromEnvironment, estimateUsd, mergeCaps, openUsageLedger } from "./usage.js";
 import type { BlockedCap, SpendCaps, UsageLedger, UsageReport } from "./usage.js";
+import { attachHealthyDaemon, defaultWardenS1StateDir, ensureWardenS1Daemon } from "./warden-s1-daemon.js";
+import type { DaemonEndpoint } from "./warden-s1-daemon.js";
 
 export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, sentModelId, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
@@ -261,10 +264,100 @@ interface Attempt {
   fail(): boolean;
 }
 
+function normalizeScoreLegends<Q extends Questions>(result: SystemOneResult<Q>): SystemOneResult<Q> {
+  if (!result || typeof result !== "object" || !result.answers || typeof result.answers !== "object") return result;
+  let changed = false;
+  const answers: Record<string, unknown> = {};
+  for (const [id, answer] of Object.entries(result.answers)) {
+    if (answer && typeof answer === "object" && (answer as { type?: unknown }).type === "score" && Array.isArray((answer as { legend?: unknown }).legend)) {
+      const legend = Object.fromEntries((answer as { legend: unknown[] }).legend.map((item, idx) => [String(idx), item]));
+      answers[id] = { ...answer, legend };
+      changed = true;
+    } else {
+      answers[id] = answer;
+    }
+  }
+  return changed ? ({ ...result, answers } as SystemOneResult<Q>) : result;
+}
+
+const LOCAL_DEFAULT_TIMEOUT_MS = 30_000;
+
+function createLocalWardenS1Transport(): {
+  resolveEndpoint(forceRefresh?: boolean): Promise<DaemonEndpoint>;
+  fetch: Fetch;
+} {
+  let cachedEndpoint: DaemonEndpoint | undefined;
+
+  const resolveEndpoint = async (forceRefresh = false): Promise<DaemonEndpoint> => {
+    if (!forceRefresh && cachedEndpoint) return cachedEndpoint;
+    const stateDir = defaultWardenS1StateDir();
+    const attached = await attachHealthyDaemon(stateDir);
+    if (attached) {
+      cachedEndpoint = attached;
+      return attached;
+    }
+    if (process.env[MOCK_WEIGHTS_ENV] === "1") {
+      cachedEndpoint = await ensureWardenS1Daemon({ runtime: "onnx", mockWeights: true, stateDir });
+      return cachedEndpoint;
+    }
+    let status = getWardenS1Status();
+    if (!status.ready && status.installed && status.runtime === "mlx" && !status.mlxPython) {
+      status = getWardenS1Status(undefined, { refreshProbe: true });
+    }
+    if (!status.ready) {
+      throw new TypeSafeIntegrationError(
+        "configuration",
+        status.diagnostic
+          ? `Warden-S1 is not ready: ${status.diagnostic}`
+          : "Warden-S1 local weights are not installed. Run /typesafe model download first.",
+      );
+    }
+    cachedEndpoint = await ensureWardenS1Daemon({
+      runtime: status.runtime,
+      modelDir: status.modelDir,
+      modelId: status.modelId,
+      stateDir,
+      ...(status.mlxPython ? { pythonBin: status.mlxPython } : {}),
+      ...(status.ortRuntimePath ? { ortPath: status.ortRuntimePath } : {}),
+    });
+    return cachedEndpoint;
+  };
+
+  const localFetch: Fetch = async (input, init) => {
+    const parsed = new URL(String(input));
+    const suffix = `${parsed.pathname}${parsed.search}`;
+    const dispatch = (endpoint: DaemonEndpoint): Promise<Response> => {
+      const headers = new Headers(init?.headers);
+      headers.set("authorization", `Bearer ${endpoint.token}`);
+      return globalThis.fetch(`${endpoint.url}${suffix}`, { ...init, headers });
+    };
+    const hadCached = cachedEndpoint !== undefined;
+    const endpoint = await resolveEndpoint(false);
+    try {
+      const response = await dispatch(endpoint);
+      if (response.status === 401 && !init?.signal?.aborted) {
+        // Singleton rotated its instance token; re-probe once.
+        cachedEndpoint = undefined;
+        const fresh = await resolveEndpoint(true);
+        return await dispatch(fresh);
+      }
+      return response;
+    } catch (error) {
+      if (error instanceof TypeSafeIntegrationError || init?.signal?.aborted || !hadCached) throw error;
+      // Cached singleton idle-exited; re-resolve or respawn once.
+      cachedEndpoint = undefined;
+      const fresh = await resolveEndpoint(true);
+      return await dispatch(fresh);
+    }
+  };
+
+  return { resolveEndpoint, fetch: localFetch };
+}
+
 /** A bounded, server-side TypeSafe client independent of Pi's runtime. */
 export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   const backend: ResolvedBackend = resolveBackend(options.backend);
-  let apiKey = options.apiKey?.trim();
+  let apiKey = backend.local ? "warden-s1-local" : options.apiKey?.trim();
   const baseURL = backend.host;
   // Only a registry backend maps ids; a caller-supplied endpoint's model is sent as the caller wrote it. This is the
   // same derivation the extension prints, so the consent text and the request body cannot name different models.
@@ -280,8 +373,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     const how = `Run /typesafe login${backend.name ? ` ${backend.name}` : ""} in Pi, or set ${backend.keyEnv}`;
     throw new TypeSafeIntegrationError("configuration", `No API key. ${how} in the environment.`);
   }
-  const timeout = positiveInteger(options.timeoutMs ?? 15_000, "timeoutMs");
-  const maxInputBytes = positiveInteger(options.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES, "maxInputBytes");
+  const timeout = positiveInteger(options.timeoutMs ?? (backend.local ? LOCAL_DEFAULT_TIMEOUT_MS : 15_000), "timeoutMs");
+  const maxInputBytes = positiveInteger(options.maxInputBytes ?? (backend.local ? LOCAL_MAX_INPUT_BYTES : DEFAULT_MAX_INPUT_BYTES), "maxInputBytes");
   const maxRequests = positiveInteger(options.maxRequests ?? DEFAULT_MAX_REQUESTS, "maxRequests");
   const callerRate = options.usdPerMTok === undefined ? undefined : nonNegativeNumber(options.usdPerMTok, "usdPerMTok");
   const caps = mergeCaps({
@@ -290,8 +383,10 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     ...(options.maxInputTokensPerDay === undefined ? {} : { maxInputTokensPerDay: positiveInteger(options.maxInputTokensPerDay, "maxInputTokensPerDay") }),
     ...(options.maxUsdPerDay === undefined ? {} : { maxUsdPerDay: positiveNumber(options.maxUsdPerDay, "maxUsdPerDay") }),
   }, capsFromEnvironment());
+  const localTransport = backend.local && options.fetch === undefined ? createLocalWardenS1Transport() : undefined;
+  const baseFetch = localTransport ? localTransport.fetch : options.fetch;
   // A backend with its own paths or model list fields gets a transport that rewrites them; the default backend keeps the caller's.
-  const routed = backend.path !== undefined || backend.modelsPath !== undefined || backend.modelsField !== undefined ? backendFetch(backend, options.fetch) : options.fetch;
+  const routed = backend.path !== undefined || backend.modelsPath !== undefined || backend.modelsField !== undefined ? backendFetch(backend, baseFetch) : baseFetch;
   // One wrapper ahead of both, so the backend's paths and the caller's own transport are covered; on Node the transport stays as it was.
   const transport = BUN_VERSION === undefined ? routed : readableTransport(routed ?? fetch);
   // The caller's input is validated as written, then mapped to the backend's id form; omitting it sends the backend's
@@ -409,10 +504,14 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
       }
       // Snapshot before awaiting so later mutations cannot change the request or validation.
       const request = JSON.parse(body) as SystemOneRequest<Q>;
+      if (localTransport !== undefined) {
+        await localTransport.resolveEndpoint(false);
+      }
       const attempt = startAttempt();
       const start = performance.now();
       try {
-        const result = await client.systemOne(request, callOptions);
+        const rawResult = await client.systemOne(request, callOptions);
+        const result = backend.local ? normalizeScoreLegends(rawResult) : rawResult;
         if (!validResult(result, request.questions)) throw new TypeSafeIntegrationError("response", `${backend.label} returned an unexpected answer or usage format.`);
         // An unreported count is not a count this package can add, price, or charge against a token cap.
         const inputTokens = result.usage.input_tokens ?? 0;

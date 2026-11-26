@@ -755,6 +755,7 @@ test("SessionRoute, ConsentState, CalloutState, and SessionReadiness transition 
     { env: { PI_TYPESAFE_MODEL: "jev-1.14" }, status: "valid", backend: "typesafe", sentModel: "jev-1.14", namesModel: true },
     { env: { PI_TYPESAFE_BACKEND: "openrouter" }, status: "valid", backend: "openrouter", sentModel: "typesafe/jev-1.13", namesModel: true },
     { env: { PI_TYPESAFE_BACKEND: "openrouter", PI_TYPESAFE_MODEL: "jev-latest" }, status: "valid", backend: "openrouter", sentModel: "~typesafe/jev-latest", namesModel: true },
+    { env: { PI_TYPESAFE_BACKEND: "warden-s1" }, status: "valid", backend: "warden-s1", sentModel: "warden-s1-752m", namesModel: true },
     { env: { PI_TYPESAFE_BACKEND: "open-router" }, status: "invalid" },
     { env: { PI_TYPESAFE_BACKEND: "toString" }, status: "invalid" },
   ];

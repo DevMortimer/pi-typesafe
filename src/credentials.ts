@@ -91,6 +91,7 @@ export function readStoredApiKey(backend: BackendSpec = DEFAULT_BACKEND): string
  */
 export function keySituation(backend: BackendSpec = DEFAULT_BACKEND): KeySituation {
   const config = resolveBackend(backend);
+  if (config.local) return { kind: "missing" };
   const keyEnv = config.keyEnv;
   const fromEnvironment = process.env[keyEnv]?.trim();
   if (fromEnvironment) return { kind: "environment", key: fromEnvironment, keyEnv };
@@ -129,6 +130,8 @@ export function resolveApiKey(backend: BackendSpec = DEFAULT_BACKEND): { key: st
 }
 
 export function storeApiKey(value: unknown, backend: BackendSpec = DEFAULT_BACKEND): string {
+  const config = resolveBackend(backend);
+  if (config.local) throw new TypeSafeIntegrationError("configuration", `${config.label} runs locally on 127.0.0.1 and does not use an API key.`);
   const key = normalizeApiKey(value);
   const path = credentialsPath();
   const id = credentialId(backend);
@@ -151,6 +154,7 @@ export function storeApiKey(value: unknown, backend: BackendSpec = DEFAULT_BACKE
 
 /** Remove one backend's stored key, or with no argument every stored key. Returns true when a key was removed. */
 export function clearStoredApiKey(backend?: BackendSpec): boolean {
+  if (backend !== undefined && resolveBackend(backend).local) return false;
   const path = credentialsPath();
   try {
     statSync(path);
