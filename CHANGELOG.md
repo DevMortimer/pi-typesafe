@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0
+
 ### Added
 
 - First-class local `"warden-s1"` backend (`127.0.0.1` loopback daemon, zero API key, `$0` pricing, 2 MiB `LOCAL_MAX_INPUT_BYTES` default ceiling, 30 s cold-start timeout) sharing `~/.cache/pi-warden/` weights (`DevMortimer/Warden-S1-752M-MLX-4bit` on Apple Silicon MLX, `DevMortimer/Warden-S1-752M-ONNX-Int4` elsewhere) and the `warden-s1-daemon.json` singleton daemon with `pi-warden`.
