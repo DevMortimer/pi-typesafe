@@ -25,6 +25,29 @@ const INTEGRATION_ERROR_CODES: ReadonlySet<string> = new Set<IntegrationErrorCod
 // Side tables keep extra metadata off error and AskAnswer instances so JSON.stringify and deep-equality shapes stay frozen.
 const RETRY_AFTER = new WeakMap<TypeSafeIntegrationError, number>();
 const ASSOCIATED_DISPOSITION = new WeakMap<object, ErrorDisposition>();
+const CONTEXT_LIMIT_ERRORS = new WeakSet<TypeSafeIntegrationError>();
+
+export function markContextLimitError(error: TypeSafeIntegrationError): TypeSafeIntegrationError {
+  CONTEXT_LIMIT_ERRORS.add(error);
+  return error;
+}
+
+export function isContextLimitError(error: unknown): boolean {
+  return error instanceof TypeSafeIntegrationError && CONTEXT_LIMIT_ERRORS.has(error);
+}
+
+const CONTEXT_LIMIT_RE = /\b(context[_\s-]*(length|window|size|limit)|max(imum)?[_\s-]*(context|input|prompt)?[_\s-]*(length|tokens?)|token[_\s-]*limit|too many tokens|prompt (?:is )?too long|input (?:is )?too long|exceeds?.{0,40}\b(tokens?|context|32\s*k|33\s*k|32768|33000))\b/i;
+
+function isUpstreamContextLimitError(error: APIError): boolean {
+  if (error.status !== 400) return false;
+  let text = typeof error.message === "string" ? error.message.slice(0, 4000) : "";
+  if (typeof error.body === "string") {
+    text += ` ${error.body.slice(0, 4000)}`;
+  } else if (error.body !== null && typeof error.body === "object") {
+    try { text += ` ${JSON.stringify(error.body).slice(0, 4000)}`; } catch { /* ignore unserializable */ }
+  }
+  return CONTEXT_LIMIT_RE.test(text);
+}
 
 /**
  * Safe to display: never contains upstream bodies, keys, or submitted state. The only header value a message can
@@ -143,16 +166,23 @@ export function classifyError(error: unknown): ErrorDisposition {
  */
 export function safeError(error: unknown, backend?: BackendSpec | BackendConfig): TypeSafeIntegrationError {
   if (error instanceof TypeSafeIntegrationError) return error;
+  // SDK wraps any transport throw in APIConnectionError; preserve local configuration errors thrown by the daemon transport.
+  if (error instanceof APIConnectionError && error.cause instanceof TypeSafeIntegrationError) return error.cause;
   const config = backend === undefined ? undefined : typeof backend === "string" ? backendConfig(backend) : backend;
   const subject = config?.label ?? "TypeSafe";
+  const local = config?.local === true;
   const keyEnv = config?.keyEnv ?? TYPESAFE_KEY_ENV;
   const openrouter = config !== undefined && config.host === DECISIONS_BACKENDS.openrouter.host;
-  if (error instanceof APIUserAbortError) return new TypeSafeIntegrationError("aborted", `${subject} request cancelled; an already submitted request may still be billed.`);
-  if (error instanceof APITimeoutError) return new TypeSafeIntegrationError("timeout", `${subject} request timed out; it was not retried and may still be billed.`);
+  if (error instanceof APIUserAbortError) {
+    return new TypeSafeIntegrationError("aborted", local ? `${subject} request cancelled.` : `${subject} request cancelled; an already submitted request may still be billed.`);
+  }
+  if (error instanceof APITimeoutError || (error instanceof APIConnectionError && (error.cause instanceof APITimeoutError || (error.cause instanceof Error && error.cause.name === "TimeoutError")))) {
+    return new TypeSafeIntegrationError("timeout", local ? `${subject} request timed out; it was not retried.` : `${subject} request timed out; it was not retried and may still be billed.`);
+  }
   if (error instanceof APIError) {
     const headerRetry = retryAfterSeconds(error);
     const retry = error.status === 429 ? headerRetry : undefined;
-    const advice = error.status === 401 ? `Check ${keyEnv}.`
+    const advice = error.status === 401 ? (local ? "Check the local Warden-S1 daemon or restart it." : `Check ${keyEnv}.`)
       : error.status === 402 ? (openrouter ? "Insufficient credits. Add credits at https://openrouter.ai/credits." : "Check your account balance.")
       : error.status === 403 ? "Check your account access and model permissions."
       : error.status === 429 ? `Check your account quota and try again later.${retry === undefined ? "" : ` Retry after ${retry} seconds.`}`
@@ -160,6 +190,7 @@ export function safeError(error: unknown, backend?: BackendSpec | BackendConfig)
       : "Try again later or check the service status.";
     const safe = new TypeSafeIntegrationError("http", `${subject} returned HTTP ${error.status}. ${advice} No automatic retry was made.`, error.status);
     if (headerRetry !== undefined) RETRY_AFTER.set(safe, headerRetry);
+    if (isUpstreamContextLimitError(error)) CONTEXT_LIMIT_ERRORS.add(safe);
     return safe;
   }
   if (error instanceof APIConnectionError) return new TypeSafeIntegrationError("connection", `Could not complete the ${subject} connection. No automatic retry was made.`);

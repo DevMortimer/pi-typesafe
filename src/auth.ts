@@ -6,6 +6,8 @@ import { credentialId, credentialsPath, keySituation, keySourceLabel, piTypesafe
 import type { KeySituation, KeySource } from "./credentials.js";
 import { TypeSafeIntegrationError } from "./errors.js";
 import type { IntegrationErrorCode } from "./errors.js";
+import { MOCK_WEIGHTS_ENV, getWardenS1Status } from "./local-model.js";
+import { defaultWardenS1StateDir, hasLiveDaemonMetadata } from "./warden-s1-daemon.js";
 
 const AUTH_VERSION = 1;
 const CODES: ReadonlySet<string> = new Set<IntegrationErrorCode>([
@@ -121,8 +123,8 @@ export interface AuthState {
   readonly backend: BackendSpec;
   /** Explicit auth breaker state derived from key presence, persisted record, and the rejection window. */
   readonly status: AuthStatus;
-  /** Same kinds as KeySituation: where the key in effect comes from. */
-  readonly kind: "environment" | "stored" | "missing" | "unusable";
+  /** Same kinds as KeySituation, plus `local` when a zero-key local backend is ready. */
+  readonly kind: "environment" | "stored" | "local" | "missing" | "unusable";
   readonly source?: KeySource;
   /** Where the key would be read from. */
   readonly path: string;
@@ -220,6 +222,29 @@ function isBackendEndpoint(value: object): value is BackendEndpoint {
 export function authState(options: { path?: string; backend?: BackendSpec } = {}): AuthState {
   const path = options.path ?? authStatePath();
   const backend = options.backend ?? DEFAULT_BACKEND;
+  const config = resolveBackend(backend);
+  if (config.local) {
+    const stored = readStateMap(path)[credentialId(backend)] ?? {};
+    const mockWeights = process.env[MOCK_WEIGHTS_ENV] === "1";
+    const liveDaemon = hasLiveDaemonMetadata();
+    const modelStatus = mockWeights || liveDaemon ? undefined : getWardenS1Status();
+    const ready = mockWeights || liveDaemon || Boolean(modelStatus?.ready);
+    const status: AuthStatus = ready ? "verified" : "missing";
+    const keyName = mockWeights ? "local daemon (mock weights)" : ready ? "local daemon (no key)" : "no local model";
+    const reason = !ready ? modelStatus?.diagnostic : undefined;
+    return {
+      backend,
+      status,
+      kind: ready ? "local" : "missing",
+      path: modelStatus?.modelDir ?? defaultWardenS1StateDir(),
+      ...(reason === undefined ? {} : { reason }),
+      keyName,
+      verified: ready,
+      ...(stored.verifiedAt === undefined ? {} : { verifiedAt: stored.verifiedAt }),
+      ...(stored.lastFailure === undefined ? {} : { lastFailure: stored.lastFailure }),
+      usable: ready,
+    };
+  }
   const situation = keySituation(backend);
   const stored = readStateMap(path)[credentialId(backend)] ?? {};
   const source: KeySource | undefined = situation.kind === "environment" ? "environment" : situation.kind === "stored" ? "stored" : undefined;
@@ -310,8 +335,15 @@ export interface AuthReport {
  */
 export function describeAuth(state: AuthState = authState()): AuthReport {
   const config = resolveBackend(state.backend);
-  const label = `${config.label} key`;
   const since = state.lastFailure ? ` Last failure: ${state.lastFailure.message}${state.lastFailure.at ? ` (${state.lastFailure.at})` : ""}` : "";
+  if (config.local) {
+    if (state.status === "missing") {
+      const detail = state.reason ? ` (${state.reason})` : "";
+      return { level: "error", text: `${config.label}: not ready${detail} — run /typesafe model download to install local weights.${since}` };
+    }
+    return { level: "ok", text: `${config.label}: ${state.keyName} (ready).${since}` };
+  }
+  const label = `${config.label} key`;
   switch (state.status) {
     case "missing": {
       const how = `a key is configured (/typesafe login${config.name && config.name !== DEFAULT_BACKEND ? ` ${config.name}` : ""} or ${config.keyEnv})`;

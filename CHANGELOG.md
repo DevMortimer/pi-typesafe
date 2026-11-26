@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- First-class local `"warden-s1"` backend (`127.0.0.1` loopback daemon, zero API key, `$0` pricing, 2 MiB `LOCAL_MAX_INPUT_BYTES` default ceiling, 30 s cold-start timeout) sharing `~/.cache/pi-warden/` weights (`DevMortimer/Warden-S1-752M-MLX-4bit` on Apple Silicon MLX, `DevMortimer/Warden-S1-752M-ONNX-Int4` elsewhere) and the `warden-s1-daemon.json` singleton daemon with `pi-warden`.
+- Standalone `/typesafe model status`, `/typesafe model download`, and `/typesafe help` commands with tab completions, plus local zero-key readiness in `authState`, `describeAuth`, `ensureApiKey`, and `loginWithPrompt`.
+- Strictly at-most-once persisted contextual Warden-S1 hint (`~/.pi/agent/pi-typesafe/state.json`) shown only on missing cloud API key or cloud context-limit (>33K tokens HTTP 400 / >64 KiB byte budget) and timeout errors, with zero upstream body leakage and zero repeat nagging.
+- Quiet Warden-S1 attribution line on `/typesafe model download` completion, `/typesafe model status`, and the `/typesafe` status/help footer (never in `typesafe_evaluate` results or turn notifications).
+
 ## 0.15.1
 
 ### Changed

@@ -9,9 +9,12 @@ import type { Evaluation, SpendReport, TypeSafe } from "./client.js";
 import { authState, clearAuthState, describeAuth, isKeyRejection } from "./auth.js";
 import type { AuthReport, AuthState } from "./auth.js";
 import { clearStoredApiKey, credentialsPath } from "./credentials.js";
-import { TypeSafeIntegrationError, safeError } from "./errors.js";
+import { TypeSafeIntegrationError, isContextLimitError, safeError } from "./errors.js";
+import { WARDEN_S1_CREDIT, createWardenS1HintController } from "./hint.js";
+import { MOCK_WEIGHTS_ENV, downloadWardenS1, formatDownloadProgress, getWardenS1Status } from "./local-model.js";
 import { loginWithPrompt } from "./login.js";
-import { DEFAULT_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, prepareEvaluationRequest } from "./schema.js";
+import { DEFAULT_MAX_INPUT_BYTES, LOCAL_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, prepareEvaluationRequest } from "./schema.js";
+import { getWardenS1DaemonStatus } from "./warden-s1-daemon.js";
 
 const fixedDisclosure = "Submitted state and questions will be sent to api.typesafe.ai and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.";
 
@@ -93,6 +96,12 @@ function consentFor(backend: TypeSafeBackend, model: string | undefined): RouteC
   const namesModel = backend !== DEFAULT_BACKEND || model !== undefined;
   if (!namesModel) return { text: fixedDisclosure, namesModel };
   const config = resolveBackend(backend);
+  if (config.local) {
+    return {
+      text: `Submitted state and questions stay on ${backendHost(backend)} (${config.label} local daemon) as model ${JSON.stringify(sentModelId(backend, model))} with $0 spend, no API key, and no external data transmission. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.`,
+      namesModel,
+    };
+  }
   return {
     text: `Submitted state and questions will be sent to ${backendHost(backend)} (${config.label}) as model ${JSON.stringify(sentModelId(backend, model))} and may incur charges. Do not include secrets. The extension does not collect files or conversation history. Results are model judgments, not proof or authorization.`,
     namesModel,
@@ -194,7 +203,33 @@ export function deriveSessionReadiness(input: ReadinessInput): SessionReadiness 
 
 /** The status line naming the backend, its host, and its key variable; the model is stated once, by `Model:` or the consent sentence. */
 function backendLine(route: ValidSessionRoute): string {
+  if (route.config.local) {
+    return `${route.config.label} backend: ${backendHost(route.backend)} (local daemon, no API key, $0).`;
+  }
   return `${route.config.label} backend: ${backendHost(route.backend)}, key from ${route.config.keyEnv}.`;
+}
+
+function withOptionalLines(...lines: readonly (string | undefined)[]): string {
+  return lines.filter((line): line is string => line !== undefined && line.length > 0).join("\n");
+}
+
+function mib(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+async function formatDaemonStatusLine(): Promise<string> {
+  const daemon = await getWardenS1DaemonStatus();
+  if (!daemon.running || !daemon.stats || !daemon.endpoint) return "Daemon: not running.";
+  const s = daemon.stats;
+  const mem = s.metal_active_mb !== undefined
+    ? `; ${Math.round(s.metal_active_mb)} MiB Metal${s.rss_mb !== undefined ? ` (${Math.round(s.rss_mb)} MiB RSS)` : ""}`
+    : s.rss_mb !== undefined
+      ? `; ${Math.round(s.rss_mb)} MiB RSS`
+      : "";
+  const runtimeLabel = s.runtime === "onnx" && s.activeExecutionProvider && s.activeExecutionProvider !== "cpu"
+    ? `${s.runtime}/${s.activeExecutionProvider}`
+    : s.runtime;
+  return `Daemon: running (pid ${s.pid}, ${runtimeLabel}, ${daemon.endpoint.host}:${daemon.endpoint.port}, model ${s.model}); sessions: ${s.active_session_id ? 1 : 0} active (L1), ${s.l2_ram_sessions} in RAM (L2), ${s.l3_disk_sessions} on disk (L3); ${s.requests_served} requests served${mem}.`;
 }
 const sample = {
   state: { message: "I was charged twice for my subscription. Please help today." },
@@ -230,8 +265,18 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
   let consent = initialConsent();
   let client: TypeSafe | undefined;
   let callout: CalloutState = { status: "healthy" };
+  let activeDownload: { line: string } | undefined;
+  const hintController = createWardenS1HintController();
   const getClient = (valid: ValidSessionRoute): TypeSafe =>
     client ??= createTypeSafe({ backend: valid.backend, ...(valid.model === undefined ? {} : { model: valid.model }) });
+  const notifyInfo = (ctx: ExtensionContext | undefined, text: string) => {
+    try {
+      if (ctx?.hasUI) ctx.ui.notify(text, "info");
+      else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
+    } catch {
+      // Reporting must never replace the primary result or failure.
+    }
+  };
   const callOut = (ctx: ExtensionContext | undefined, key: string, text: string) => {
     const next = transitionCallout(callout, { type: "degrade", key });
     callout = next.state;
@@ -254,20 +299,27 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     if (readiness.status === "invalid_backend") {
       callOut(ctx, "start:backend", `${readiness.error} Judgments will fail until ${BACKEND_ENV} names a valid backend or is unset.`);
     } else if (readiness.status === "blocked_auth") {
-      callOut(ctx, `start:${readiness.authReport.level}`, `TypeSafe is enabled but judgments will fail. ${readiness.authReport.text}`);
+      const hint = !readiness.route.config.local && readiness.auth.kind === "missing"
+        ? hintController.consume({ kind: "missing_cloud_key", backend: readiness.route.backend })
+        : undefined;
+      callOut(ctx, `start:${readiness.authReport.level}`, withOptionalLines(`TypeSafe is enabled but judgments will fail. ${readiness.authReport.text}`, hint));
     }
   });
 
   pi.registerEntryRenderer<Evaluation<Questions>>("typesafe-result", (entry, { expanded }) => new Text(entry.data ? format(entry.data, expanded) : "TypeSafe · no result", 0, 0));
 
+  const toolMaxInputBytes = route.status === "valid" && route.config.local ? LOCAL_MAX_INPUT_BYTES : DEFAULT_MAX_INPUT_BYTES;
+
   pi.registerTool({
     name: "typesafe_evaluate",
     label: "TypeSafe",
     description: route.status === "valid"
-      ? `Evaluate supplied state with independent Choice, Score, and Noul questions in one ${route.config.label} request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${route.consent.text} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${DEFAULT_MAX_INPUT_BYTES / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`
+      ? `Evaluate supplied state with independent Choice, Score, and Noul questions in one ${route.config.label} request. Each question judges the whole state, so when several items are involved, put each item in a named state field (e.g. \`reports.r1\`) and ask one question per item per dimension (e.g. \`r1_owner\`, \`r2_owner\`), naming the field in the instructions; never aggregate several items into one question. ${route.consent.text} Requires operator opt-in via /typesafe enable or PI_TYPESAFE_ENABLED=1. Limit: 32 questions, ${toolMaxInputBytes / 1024} KiB JSON, ${DEFAULT_MAX_REQUESTS} attempts per session; no retries.`
       : `Evaluate supplied state with TypeSafe. Unavailable: ${route.error} Fix or unset ${BACKEND_ENV} before calling this tool.`,
     promptSnippet: route.status === "valid"
-      ? `Ask batched structured questions with ${route.config.label} (external service; operator opt-in required)`
+      ? (route.config.local
+        ? `Ask batched structured questions with ${route.config.label} (local 127.0.0.1 daemon; operator opt-in required)`
+        : `Ask batched structured questions with ${route.config.label} (external service; operator opt-in required)`)
       : `TypeSafe unavailable: invalid ${BACKEND_ENV} configuration`,
     promptGuidelines: [
       // The payload shape is what models get wrong on the first call; the same sample the playground edits is the cheapest way to show it.
@@ -286,9 +338,10 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
       if (readiness.status === "invalid_backend") throw new TypeSafeIntegrationError("configuration", readiness.error);
       if (readiness.status === "disabled") throw new TypeSafeIntegrationError("configuration", "TypeSafe is disabled. Ask the operator to run /typesafe enable; do not enable it by editing configuration or environment files.");
       const validRoute = readiness.route;
-      // The tool admits through the same rule as the library; evaluate() re-runs it idempotently.
-      const request = prepareEvaluationRequest(params);
+      const maxInputBytes = validRoute.config.local ? LOCAL_MAX_INPUT_BYTES : DEFAULT_MAX_INPUT_BYTES;
       try {
+        // The tool admits through the same rule as the library; evaluate() re-runs it idempotently.
+        const request = prepareEvaluationRequest(params, { maxInputBytes, limits: validRoute.config.limits });
         const result = await getClient(validRoute).evaluate(request, signal ? { signal } : {});
         callout = transitionCallout(callout, { type: "evaluate_succeeded" }).state;
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
@@ -300,13 +353,22 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           const auth = describeAuth(authState({ backend: validRoute.backend }));
           callOut(ctx, `run:${safe.code}:${safe.status ?? ""}`, `${auth.text} Judgments will fail until the key is fixed.`);
         } else if (safe.code === "configuration") {
-          callOut(ctx, "run:configuration", `${safe.message} Judgments will fail until that is fixed.`);
+          const missingCloudKey = !validRoute.config.local && authState({ backend: validRoute.backend }).kind === "missing";
+          const hint = missingCloudKey ? hintController.consume({ kind: "missing_cloud_key", backend: validRoute.backend }) : undefined;
+          callOut(ctx, "run:configuration", withOptionalLines(`${safe.message} Judgments will fail until that is fixed.`, hint));
+        } else if (!validRoute.config.local && (isContextLimitError(safe) || safe.code === "timeout")) {
+          const hint = hintController.consume({
+            kind: safe.code === "timeout" ? "cloud_timeout" : "cloud_context_limit",
+            backend: validRoute.backend,
+          });
+          if (hint) notifyInfo(ctx, hint);
         }
         throw safe;
       }
     },
     renderCall(args) {
-      return new Text(`TypeSafe · ${Object.keys(args.questions ?? {}).length} questions · external request`, 0, 0);
+      const target = route.status === "valid" && route.config.local ? "local 127.0.0.1" : "external request";
+      return new Text(`TypeSafe · ${Object.keys(args.questions ?? {}).length} questions · ${target}`, 0, 0);
     },
     renderResult(result, { expanded, isPartial }) {
       if (isPartial) return new Text("TypeSafe · waiting for response", 0, 0);
@@ -315,15 +377,22 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const actions = ["login", "logout", "setup", "status", "enable", "disable", "test", "playground"];
+  const actions = ["login", "logout", "setup", "status", "enable", "disable", "test", "playground", "model", "help"];
+  const cloudBackends = (Object.keys(DECISIONS_BACKENDS) as TypeSafeBackend[]).filter(name => !DECISIONS_BACKENDS[name].local);
+  const modelSubcommands = ["status", "download"] as const;
   pi.registerCommand("typesafe", {
-    description: "TypeSafe login, consent, usage, sample test, and JSON playground",
+    description: "TypeSafe login, consent, local Warden-S1 model, usage, sample test, and JSON playground",
     getArgumentCompletions(prefix) {
       const [verb, ...rest] = prefix.split(/\s+/);
       if (rest.length && (verb === "login" || verb === "logout")) {
         const typed = rest.join(" ");
-        const names = (Object.keys(DECISIONS_BACKENDS) as TypeSafeBackend[]).filter(name => name.startsWith(typed));
+        const names = cloudBackends.filter(name => name.startsWith(typed));
         return names.length ? names.map(name => ({ value: `${verb} ${name}`, label: name })) : null;
+      }
+      if (rest.length && verb === "model") {
+        const typed = rest.join(" ");
+        const subs = modelSubcommands.filter(sub => sub.startsWith(typed));
+        return subs.length ? subs.map(sub => ({ value: `model ${sub}`, label: sub })) : null;
       }
       const matches = actions.filter(action => action.startsWith(prefix)).map(action => ({ value: action, label: action }));
       return matches.length ? matches : null;
@@ -331,7 +400,7 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
     async handler(args, ctx) {
       const [action = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       const backendArg = rest[0];
-      const backendChoices = Object.keys(DECISIONS_BACKENDS).join(", ");
+      const backendChoices = cloudBackends.join(", ");
       const report = (text: string, level: "info" | "warning" | "error" = "info") => {
         if (ctx.hasUI) ctx.ui.notify(text, level);
         else pi.sendMessage({ customType: "typesafe-status", content: text, display: true });
@@ -341,8 +410,86 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         report("TypeSafe disabled for future agent calls. In-flight requests are not cancelled.");
         return;
       }
-      if (!actions.includes(action)) {
-        report(`Usage: /typesafe ${actions.join(" | ")}. login and logout take a backend name: ${backendChoices}.`, "warning");
+      if (action === "help" || !actions.includes(action)) {
+        const usageLine = `Usage: /typesafe login | logout | setup | status | enable | disable | test | playground | model [status | download] | help. login and logout take a cloud backend name: ${backendChoices}. Set ${BACKEND_ENV}=warden-s1 for local offline evaluations.`;
+        report(withOptionalLines(usageLine, WARDEN_S1_CREDIT), action === "help" ? "info" : "warning");
+        return;
+      }
+      if (action === "model") {
+        const sub = rest[0] ?? "status";
+        if (sub === "status") {
+          const modelStatus = getWardenS1Status(undefined, { refreshProbe: true });
+          const stateText = activeDownload
+            ? activeDownload.line
+            : modelStatus.installed
+              ? `installed and verified (${mib(modelStatus.downloadedBytes)} MiB on disk, ${modelStatus.manifest?.files.length ?? 0} SHA-256 verified files)`
+              : modelStatus.incomplete
+                ? `incomplete (${mib(modelStatus.downloadedBytes)} of ${mib(modelStatus.totalBytes)} MiB; /typesafe model download resumes it)`
+                : `not downloaded (${modelStatus.expectedMib} MiB; run /typesafe model download)`;
+          const backendText = route.status === "valid" && route.backend === "warden-s1"
+            ? `active (${BACKEND_ENV}=warden-s1; 127.0.0.1 loopback, no API key, $0).`
+            : `not active (set ${BACKEND_ENV}=warden-s1 and reload Pi to route judgments locally).`;
+          const daemonText = await formatDaemonStatusLine();
+          const lines = [
+            `Warden-S1 local model: runtime ${modelStatus.runtime}; repo ${modelStatus.repoId} (model ${modelStatus.modelId}).`,
+            `Cache: ${modelStatus.modelDir}.`,
+            `State: ${stateText}${process.env[MOCK_WEIGHTS_ENV] === "1" ? `; ${MOCK_WEIGHTS_ENV}=1 runs synthetic weights` : ""}${modelStatus.diagnostic ? `; ${modelStatus.diagnostic}` : ""}.`,
+            `Backend: ${backendText}`,
+            daemonText,
+            WARDEN_S1_CREDIT,
+          ];
+          report(lines.join("\n"), "info");
+          return;
+        }
+        if (sub === "download") {
+          const current = getWardenS1Status(undefined, { refreshProbe: true });
+          if (current.ready) {
+            const activation = route.status === "valid" && route.backend === "warden-s1"
+              ? `${BACKEND_ENV}=warden-s1 is active.`
+              : `Set ${BACKEND_ENV}=warden-s1 and reload Pi to route judgments locally.`;
+            report(withOptionalLines(
+              `Warden-S1 (${current.runtime}) is already downloaded and verified at ${current.modelDir} (${mib(current.downloadedBytes)} MiB). ${activation}`,
+              WARDEN_S1_CREDIT,
+            ), "info");
+            return;
+          }
+          if (activeDownload) {
+            report(`Warden-S1 download already in progress: ${activeDownload.line}.`, "info");
+            return;
+          }
+          const tracker = { line: `Warden-S1 (${current.runtime}): starting download...` };
+          activeDownload = tracker;
+          const run = downloadWardenS1(undefined, {
+            onProgress: (progress) => {
+              tracker.line = formatDownloadProgress(progress);
+              if (ctx.hasUI) ctx.ui.setStatus?.("typesafe-model", tracker.line);
+            },
+          }).then(
+            (result) => {
+              const activation = route.status === "valid" && route.backend === "warden-s1"
+                ? `Local judgments are ready via ${BACKEND_ENV}=warden-s1.`
+                : `Set ${BACKEND_ENV}=warden-s1 and reload Pi to route judgments locally.`;
+              report(withOptionalLines(
+                `Warden-S1 (${result.runtime}) downloaded and SHA-256 verified at ${result.modelDir} (${mib(result.totalBytes)} MiB). ${activation}`,
+                WARDEN_S1_CREDIT,
+              ), "info");
+            },
+            (error: unknown) => {
+              report(`Warden-S1 download failed: ${error instanceof Error ? error.message : String(error)}. Run /typesafe model download to resume.`, "warning");
+            },
+          ).finally(() => {
+            if (activeDownload === tracker) activeDownload = undefined;
+            if (ctx.hasUI) ctx.ui.setStatus?.("typesafe-model", undefined);
+          });
+          if (ctx.hasUI) {
+            report(`Downloading Warden-S1 (${current.runtime}, ~${current.expectedMib} MiB) into ${current.modelDir}...`, "info");
+            void run;
+          } else {
+            await run;
+          }
+          return;
+        }
+        report(withOptionalLines("Usage: /typesafe model status | download.", WARDEN_S1_CREDIT), "warning");
         return;
       }
       if (action === "status") {
@@ -355,17 +502,21 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           ? `Today ${spend.today.requestsStarted} requests (${spend.today.requestsSucceeded} ok, ${spend.today.requestsFailed} failed), ${spend.today.inputTokens} input tokens, ~$${spend.today.estimatedUsd.toFixed(4)}.`
           : "";
         if (readiness.status === "invalid_backend") {
-          report([
+          const summary = [
             `TypeSafe: ${consent.status}.`,
             `Backend: ${BACKEND_ENV} is invalid — ${readiness.error} Judgments will fail.`,
             session,
             "Session limits reset on session start/reload; daily counters persist and caps come from client options or PI_TYPESAFE_MAX_* environment variables.",
-          ].join(" "), "warning");
+          ].join(" ");
+          report(withOptionalLines(summary, WARDEN_S1_CREDIT), "warning");
           return;
         }
         const budget = readiness.status === "ready" ? undefined : readiness.budget;
         const version = !readiness.route.consent.namesModel ? `Model: ${readiness.route.sentModel}.` : "";
-        report([
+        const hint = !readiness.route.config.local && readiness.auth.kind === "missing"
+          ? hintController.consume({ kind: "missing_cloud_key", backend: readiness.route.backend })
+          : undefined;
+        const summary = [
           `TypeSafe: ${consent.status}.`,
           backendLine(readiness.route),
           readiness.authReport.text,
@@ -376,7 +527,8 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           readiness.route.backend === DEFAULT_BACKEND ? "" : `Set ${MODEL_ENV} to send another model.`,
           "Session limits reset on session start/reload; daily counters persist and caps come from client options or PI_TYPESAFE_MAX_* environment variables.",
           readiness.route.consent.text,
-        ].filter((part) => part !== "").join(" "), readiness.status === "blocked_auth" || readiness.status === "blocked_budget" ? "warning" : "info");
+        ].filter((part) => part !== "").join(" ");
+        report(withOptionalLines(summary, hint, WARDEN_S1_CREDIT), readiness.status === "blocked_auth" || readiness.status === "blocked_budget" ? "warning" : "info");
         return;
       }
       // Invalid route carries no backend id: decline every command that would touch keys, consent, or the API.
@@ -393,8 +545,12 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
         // what judgments actually use. resolveBackend refuses a name the registry does not know.
         const spec: TypeSafeBackend = backendArg === undefined ? route.backend : backendArg as TypeSafeBackend;
         const config = resolveBackend(spec);
-        const isActive = config.keyEnv === route.config.keyEnv;
+        const isActive = spec === route.backend;
         if (action === "logout") {
+          if (config.local) {
+            report(`${config.label} runs locally on 127.0.0.1 and stores no API key.`);
+            return;
+          }
           const removed = clearStoredApiKey(spec);
           const env = process.env[config.keyEnv]?.trim();
           clearAuthState(spec);
@@ -408,8 +564,19 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           report(`${removed ? `Removed the stored ${config.label} key at ${credentialsPath()}.` : `No stored ${config.label} key to remove.`}${tail}`);
           return;
         }
+        if (action === "login" && config.local) {
+          report(`${config.label} runs locally on 127.0.0.1 and does not use an API key. Run /typesafe model download to install local weights or /typesafe model status to check it.`);
+          return;
+        }
         if (!ctx.hasUI) {
-          report(`This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and ${config.keyEnv} before launching Pi.`, "warning");
+          if (config.local) {
+            report(`This command needs interactive Pi. For headless local tool use, download weights via /typesafe model download and set PI_TYPESAFE_ENABLED=1 and ${BACKEND_ENV}=warden-s1 before launching Pi.`, "warning");
+            return;
+          }
+          const hint = !route.config.local && authState({ backend: route.backend }).kind === "missing"
+            ? hintController.consume({ kind: "missing_cloud_key", backend: route.backend })
+            : undefined;
+          report(withOptionalLines(`This command needs interactive Pi. For headless tool use, explicitly set PI_TYPESAFE_ENABLED=1 and ${config.keyEnv} before launching Pi.`, hint), "warning");
           return;
         }
         const readiness = deriveSessionReadiness({ route, consent, spend: client?.getSpend() });
@@ -417,36 +584,61 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           report(`${readiness.error} /typesafe ${action} cannot run until ${BACKEND_ENV} names a valid backend or is unset.`, "warning");
           return;
         }
-        if (action === "login" || (action === "setup" && readiness.auth.kind === "missing")) {
+        if (action === "login" || (action === "setup" && !route.config.local && readiness.auth.kind === "missing")) {
           // The one rule for every backend: the stored key is used unless the backend's variable is set, and then it wins.
           if (process.env[config.keyEnv]?.trim()) {
             report(`${config.keyEnv} is set in the environment and takes precedence over a stored key. Unset it before using /typesafe login.`, "warning");
             return;
           }
           const login = await loginWithPrompt(ctx, { backend: spec });
-          if (login === undefined) { report("Login cancelled; nothing was saved."); return; }
+          if (login === undefined) {
+            const hint = action === "setup" && !route.config.local
+              ? hintController.consume({ kind: "missing_cloud_key", backend: route.backend })
+              : undefined;
+            report(withOptionalLines("Login cancelled; nothing was saved.", hint));
+            return;
+          }
           if (isActive) {
             client = undefined;
             callout = transitionCallout(callout, { type: "login_succeeded" }).state;
           }
           const proof = login.models === undefined ? "verified with one request" : `verified (${login.models} model${login.models === 1 ? "" : "s"} available)`;
-          const hint = isActive
+          const nextStep = isActive
             ? (consent.status === "enabled" ? "" : " Run /typesafe enable to allow agent tool calls.")
             : ` ${BACKEND_ENV} is ${route.backend}; set it to ${config.name} to send judgments there.`;
-          report(`${config.label} key ${proof} and saved to ${login.path} with owner-only permissions.${hint}`);
+          report(`${config.label} key ${proof} and saved to ${login.path} with owner-only permissions.${nextStep}`);
           return;
         }
         if (action === "setup") {
+          const budget = readiness.status === "ready" ? undefined : readiness.budget;
+          if (route.config.local) {
+            if (!readiness.auth.usable) {
+              report("Warden-S1 local weights are not installed. Run /typesafe model download first, then /typesafe enable.", "warning");
+              return;
+            }
+            report(`Warden-S1 local model is ready (no API key, $0). Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls.${budget ? ` ${budget.message}` : ""}`, budget ? "warning" : "info");
+            return;
+          }
           const current = readiness.auth.kind === "environment" || readiness.auth.kind === "stored" ? `configured via ${readiness.auth.keyName}`
             : readiness.auth.kind === "unusable" ? `unusable — ${readiness.auth.reason}`
             : "missing";
-          const budget = readiness.status === "ready" ? undefined : readiness.budget;
           report(`Key ${current}. Run /typesafe test for one sample request or /typesafe enable to allow agent tool calls.${budget ? ` ${budget.message}` : ""}`, budget ? "warning" : "info");
           return;
         }
         if (action === "enable") {
-          if (readiness.auth.kind === "missing") { report("Run /typesafe login first: no API key is configured.", "warning"); return; }
-          if (readiness.auth.kind === "unusable") { report(`The stored key cannot be used. ${readiness.auth.reason}`, "warning"); return; }
+          if (route.config.local) {
+            if (!readiness.auth.usable) {
+              report("Run /typesafe model download first: local Warden-S1 weights are not installed.", "warning");
+              return;
+            }
+          } else {
+            if (readiness.auth.kind === "missing") {
+              const hint = hintController.consume({ kind: "missing_cloud_key", backend: route.backend });
+              report(withOptionalLines("Run /typesafe login first: no API key is configured.", hint), "warning");
+              return;
+            }
+            if (readiness.auth.kind === "unusable") { report(`The stored key cannot be used. ${readiness.auth.reason}`, "warning"); return; }
+          }
           if (await ctx.ui.confirm("Enable TypeSafe for this session?", route.consent.text)) {
             consent = transitionConsent(consent, { type: "enable" });
             report(`TypeSafe enabled. Up to ${DEFAULT_MAX_REQUESTS} attempts in this session; /typesafe disable stops future agent calls.`);
@@ -459,14 +651,25 @@ export default function typesafeExtension(pi: ExtensionAPI): void {
           if (text === undefined) return;
           try { request = JSON.parse(text); } catch { report("Invalid JSON. Keep quoted strings on one line; nothing was sent.", "error"); return; }
         }
-        const validated = prepareEvaluationRequest(request);
+        const maxInputBytes = route.config.local ? LOCAL_MAX_INPUT_BYTES : DEFAULT_MAX_INPUT_BYTES;
+        const validated = prepareEvaluationRequest(request, { maxInputBytes, limits: route.config.limits });
         if (!await ctx.ui.confirm("Send this TypeSafe request?", route.consent.text)) return;
         const result = await getClient(route).evaluate(validated);
         callout = transitionCallout(callout, { type: "evaluate_succeeded" }).state;
         // Playground results stay out of LLM context; the agent tool returns its own results normally.
         pi.appendEntry("typesafe-result", result);
       } catch (error) {
-        report(safeError(error, route.backend).message, "error");
+        const safe = safeError(error, route.backend);
+        const hint = !route.config.local
+          ? (safe.code === "configuration" && authState({ backend: route.backend }).kind === "missing"
+            ? hintController.consume({ kind: "missing_cloud_key", backend: route.backend })
+            : isContextLimitError(safe)
+              ? hintController.consume({ kind: "cloud_context_limit", backend: route.backend })
+              : safe.code === "timeout"
+                ? hintController.consume({ kind: "cloud_timeout", backend: route.backend })
+                : undefined)
+          : undefined;
+        report(withOptionalLines(safe.message, hint), "error");
       }
     },
   });

@@ -1,10 +1,13 @@
 import type { SystemOneRequest } from "@typesafe-ai/sdk";
 import { Type } from "typebox";
 import { Check, Errors } from "typebox/value";
-import { TypeSafeIntegrationError } from "./errors.js";
+import { TypeSafeIntegrationError, markContextLimitError } from "./errors.js";
 
 /** Default UTF-8 JSON byte budget for one evaluation request; the tool and the client share it. */
 export const DEFAULT_MAX_INPUT_BYTES = 65_536;
+
+/** Default UTF-8 JSON byte budget for local 128K-context evaluations (2 MiB). */
+export const LOCAL_MAX_INPUT_BYTES = 2_097_152;
 
 /** Questions one request may ask. More than this needs `chunkEvaluationRequest`, which splits and fans out. */
 export const DEFAULT_MAX_QUESTIONS = 32;
@@ -246,7 +249,7 @@ function assertWithinBackendLimits(request: SystemOneRequest, limits: BackendLim
 /** One byte rule for every limit check: measure the serialized request and name the configured limit. */
 export function assertWithinByteLimit(text: string, maxInputBytes: number): void {
   if (Buffer.byteLength(text, "utf8") > maxInputBytes) {
-    throw new TypeSafeIntegrationError("validation", `Evaluation exceeds the ${maxInputBytes}-byte input limit.`);
+    throw markContextLimitError(new TypeSafeIntegrationError("validation", `Evaluation exceeds the ${maxInputBytes}-byte input limit.`));
   }
 }
 

@@ -2,12 +2,14 @@ import { TypeSafeIntegrationError } from "./errors.js";
 import { DEFAULT_BACKEND_LIMITS } from "./schema.js";
 import type { BackendLimits } from "./schema.js";
 
-export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid" | "subq" | "nace";
+export type TypeSafeBackend = "typesafe" | "openrouter" | "commandcode" | "liquid" | "subq" | "nace" | "warden-s1";
 
 export interface BackendConfig {
-  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI", "SubQ", "Nace.AI". */
+  /** Human name for status lines: "TypeSafe", "OpenRouter", "Command Code", "Liquid AI", "SubQ", "Nace.AI", "Warden-S1". */
   label: string;
   host: string;
+  /** True for a loopback local backend that needs no API key and sends nothing off-machine. */
+  local?: boolean;
   /** The environment variable that carries this backend's key. Absent means the TypeSafe key resolution applies. */
   keyEnv?: string;
   /** Request path, when the backend does not serve the SDK's own `/v1/systemone`. */
@@ -47,6 +49,7 @@ export interface ResolvedBackend extends RegistryBackendConfig {
   readonly name?: TypeSafeBackend;
   /** Origin only: scheme, host, and port. */
   readonly host: string;
+  readonly local: boolean;
   readonly keyEnv: string;
   /** The model id sent when the caller names none, already in the backend's form. Absent when the endpoint names none. */
   readonly defaultModel?: string;
@@ -113,6 +116,17 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     // An alias or retired id is billed at the version that answers it; `drex-max-finance` has no published price, so it falls back to the default estimate.
     prices: { "drex-v2.0": 0.06, "drex-v1.5": 0.05, "drex-max": 0.03, "drex-max-v1.1": 0.03, "drex-latest": 0.06, "nacedm-latest": 0.06, "drex-v1.0": 0.03, "drex-v1.1": 0.05 },
   },
+  "warden-s1": {
+    label: "Warden-S1",
+    host: "http://127.0.0.1",
+    local: true,
+    modelsVerifyKey: false,
+    prices: {
+      "warden-s1-752m": 0,
+      "warden-s1-752m-mlx-q4": 0,
+      "warden-s1-752m-onnx-int4": 0,
+    },
+  },
 };
 
 /** The registry entry for a backend name; a `configuration` error for a name the registry does not know. */
@@ -157,6 +171,7 @@ const DEFAULT_MODEL: Record<TypeSafeBackend, string> = {
   liquid: "d1:free",
   subq: "subq-snap-preview",
   nace: "drex-v2.0",
+  "warden-s1": "warden-s1-752m",
 };
 
 /**
@@ -192,6 +207,7 @@ export function sentModelId(backend: TypeSafeBackend, model?: string): string {
  * `model` is the id as sent. A caller-supplied endpoint has no prices.
  */
 export function backendPrice(backend: ResolvedBackend, model: string): number | undefined {
+  if (backend.local) return 0;
   const prices = backend.prices;
   return prices !== undefined && Object.hasOwn(prices, model) ? prices[model] : undefined;
 }
@@ -239,11 +255,13 @@ export function resolveBackend(backend?: BackendSpec): ResolvedBackend {
   const spec: BackendSpec = backend === undefined ? DEFAULT_BACKEND : backend;
   if (typeof spec === "string") {
     const entry = backendConfig(spec);
+    const local = entry.local === true;
     return {
       ...entry,
       name: spec,
       host: entry.host,
-      keyEnv: entry.keyEnv ?? TYPESAFE_KEY_ENV,
+      local,
+      keyEnv: local ? "" : (entry.keyEnv ?? TYPESAFE_KEY_ENV),
       defaultModel: defaultModelId(spec),
       modelsVerifyKey: entry.modelsVerifyKey !== false,
       limits: { ...DEFAULT_BACKEND_LIMITS, ...entry.limits },
@@ -282,6 +300,7 @@ export function resolveBackend(backend?: BackendSpec): ResolvedBackend {
   return {
     label,
     host: host.origin,
+    local: false,
     keyEnv: spec.keyEnv,
     modelsVerifyKey: spec.modelsVerifyKey === true,
     limits,

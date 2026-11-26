@@ -20,9 +20,21 @@ export type { BlockedCap, SpendCaps, UsageLedger, UsageLedgerOptions, UsageRepor
 export { TypeSafeIntegrationError, classifyError } from "./errors.js";
 export type { ErrorDisposition, ErrorTarget, IntegrationErrorCode } from "./errors.js";
 export {
-  ADMISSION_STAGES, DEFAULT_BACKEND_LIMITS, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
+  ADMISSION_STAGES, DEFAULT_BACKEND_LIMITS, DEFAULT_MAX_INPUT_BYTES, DEFAULT_MAX_QUESTIONS, LOCAL_MAX_INPUT_BYTES, evaluationSchema, normalizeEvaluationRequest, parseEvaluationRequest, prepareEvaluationRequest,
 } from "./schema.js";
 export type { AdmissionStage, BackendLimits, PrepareEvaluationOptions } from "./schema.js";
+export {
+  MOCK_WEIGHTS_ENV, deriveWardenS1ModelState, downloadWardenS1, formatDownloadProgress, getWardenS1Status, resolveCacheRoot, resolveModelDir, selectWardenS1Runtime,
+} from "./local-model.js";
+export type {
+  DownloadOptions, DownloadProgress, DownloadResult, LocalModelConfig, LocalModelRuntime, SelectedRuntime, WardenS1ModelState, WardenS1Status,
+} from "./local-model.js";
+export {
+  attachHealthyDaemon, defaultWardenS1StateDir, ensureWardenS1Daemon, getWardenS1DaemonStatus, hasLiveDaemonMetadata, stopWardenS1Daemon,
+} from "./warden-s1-daemon.js";
+export type {
+  DaemonEndpoint, DaemonMetadata, DaemonStatus, EnsureDaemonOptions, WardenS1Runtime,
+} from "./warden-s1-daemon.js";
 export { choice, noul, score } from "@typesafe-ai/sdk";
 export type {
   Questions, Question, SystemOneRequest, SystemOneResult, EntryType, JsonValue,

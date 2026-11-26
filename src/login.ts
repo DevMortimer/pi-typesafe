@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
 import { dirname } from "node:path";
 import { noul } from "@typesafe-ai/sdk";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { authStatePath } from "./auth.js";
+import { authState, authStatePath } from "./auth.js";
 import { DEFAULT_BACKEND, resolveBackend } from "./backends.js";
 import type { BackendSpec, ResolvedBackend } from "./backends.js";
 import { createTypeSafe } from "./client.js";
@@ -153,6 +153,11 @@ export async function loginWithPrompt(ctx: ExtensionCommandContext, options: { b
     return state;
   };
 
+  if (config.local) {
+    const error = new TypeSafeIntegrationError("configuration", `${config.label} runs locally on 127.0.0.1 and does not use an API key. Run /typesafe model download to install local weights.`);
+    advance({ type: "failed", error });
+    throw error;
+  }
   if (process.env[config.keyEnv]?.trim()) {
     const error = new TypeSafeIntegrationError("configuration", `${config.keyEnv} is set in the environment and takes precedence over a stored key. Unset it before logging in interactively.`);
     advance({ type: "failed", error });
@@ -216,7 +221,7 @@ export async function loginWithPrompt(ctx: ExtensionCommandContext, options: { b
 }
 
 export type EnsureApiKeyResult =
-  | { source: KeySource; login?: undefined }
+  | { source: KeySource | "local"; login?: undefined }
   | { source: "stored"; login: LoginResult };
 
 /**
@@ -227,6 +232,12 @@ export type EnsureApiKeyResult =
  */
 export async function ensureApiKey(ctx: ExtensionCommandContext, options: { backend?: BackendSpec } = {}): Promise<EnsureApiKeyResult | undefined> {
   const backend = options.backend ?? DEFAULT_BACKEND;
+  const config = resolveBackend(backend);
+  if (config.local) {
+    const state = authState({ backend });
+    if (state.usable) return { source: "local" };
+    throw new TypeSafeIntegrationError("configuration", `${config.label} local weights are not installed. Run /typesafe model download first.`);
+  }
   const situation = keySituation(backend);
   if (situation.kind === "environment" || situation.kind === "stored") return { source: situation.kind };
   if (situation.kind === "unusable") throw new TypeSafeIntegrationError("configuration", situation.reason);
