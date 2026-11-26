@@ -458,6 +458,32 @@ test("downloadWardenS1 verifies SHA-256 digests and writes warden_s1_ready.json 
   assert.equal(statusAfter.state, "ready");
 });
 
+test("downloadWardenS1 rejects a SHA-256 mismatch without marking weights ready", async () => {
+  const { downloadWardenS1 } = await import("../src/index.js");
+  const badBytes = Buffer.from("corrupted-weights");
+  const wrongSha = "0".repeat(64);
+  const manifestJson = JSON.stringify({
+    files: [{ path: "model.onnx", bytes: badBytes.length, sha256: wrongSha }],
+  });
+  await assert.rejects(
+    downloadWardenS1({ runtime: "onnx" }, {
+      hfBaseUrl: "https://hf.example.test",
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/onnx_manifest.json")) {
+          return new Response(manifestJson, { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(badBytes, { status: 200 });
+      },
+      ensureOrtRuntime: async () => join(agentDir, "pi-warden", "runtime", "node_modules", "onnxruntime-node"),
+    }),
+    /SHA-256 mismatch/,
+  );
+  const statusAfter = getWardenS1Status({ runtime: "onnx" }, { refreshProbe: true });
+  assert.equal(statusAfter.ready, false);
+  assert.equal(statusAfter.installed, false);
+});
+
 test("mock-weights loopback singleton daemon: cold-start spawn, typed answers, >64 KiB payload, $0 spend, and second client attach", async () => {
   process.env[MOCK_WEIGHTS_ENV] = "1";
   process.env.PI_TYPESAFE_BACKEND = "warden-s1";
