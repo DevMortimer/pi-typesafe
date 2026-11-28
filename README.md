@@ -74,14 +74,14 @@ The [TypeSafe docs](https://docs.typesafe.ai/primitives) cover each primitive in
 An enabled extension with no usable key looks exactly like a working one — one evaluation ran keyless for hours before anyone noticed. Three answers exist now, and `/typesafe status` prints all of them:
 
 - **Is Jev reachable?** `authState()` reports the key source, whether it has been accepted, and the last failure that degraded it; `describeAuth()` turns that into a level and one safe line. The extension calls both at session start, so a headless run says judgments will fail instead of quietly falling back to its offline path. Only an HTTP 401 rejects the key, and even that stops vetoing it after fifteen minutes; a 403 refuses one request — permissions, a guardrail block, moderation, or a provider cap — and is shown without ever making the key unusable. Every message names the backend that answered.
-- **What has this run cost?** `getSpend()` returns session counters, today's persisted counters, and the cap currently reached. Cost is estimated from input tokens only, because output is free; a count the API did not report counts as nothing.
+- **What has this run cost?** `getSpend()` returns session counters, today's persisted counters, and the cap currently reached. Cost is estimated from input tokens only, because output is free, except on OpenRouter, which reports what each request was billed and is recorded at that; a count the API did not report counts as nothing.
 - **When does it stop?** `maxRequests` bounds a client instance. Three caps bound a local day, survive restarts, and stop a request before it is submitted:
 
 | Option | Environment | Bounds |
 | --- | --- | --- |
 | `maxRequestsPerDay` | `PI_TYPESAFE_MAX_REQUESTS_PER_DAY` | requests |
 | `maxInputTokensPerDay` | `PI_TYPESAFE_MAX_INPUT_TOKENS_PER_DAY` | input tokens |
-| `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | estimated spend |
+| `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | reported or estimated spend |
 
 The environment may lower an explicit cap but never raise it. A reached cap raises a `budget` error naming the cap, the amount used, and the day.
 

@@ -122,9 +122,9 @@ export interface TypeSafeOptions {
   maxRequestsPerDay?: number;
   /** Input tokens per local day. Unlimited by default. */
   maxInputTokensPerDay?: number;
-  /** Estimated spend per local day, in US dollars. Unlimited by default. */
+  /** Spend per local day, in US dollars: what the backend reported, else the estimate. Unlimited by default. */
   maxUsdPerDay?: number;
-  /** Price in USD per million input tokens, used for every request's cost and the USD cap; 0 means free. Default: the backend's price for the model sent, else DEFAULT_USD_PER_MTOK. */
+  /** Price in USD per million input tokens, used for a request's cost and the USD cap when the backend reports no cost; 0 means free. Default: the backend's price for the model sent, else DEFAULT_USD_PER_MTOK. */
   usdPerMTok?: number;
   /** The usage ledger; defaults to the store next to the key. Injected by tests. */
   ledger?: UsageLedger;
@@ -134,7 +134,7 @@ export interface TypeSafeOptions {
 export interface EvaluationOptions { signal?: AbortSignal }
 export type Evaluation<Q extends Questions> = SystemOneResult<Q> & { readonly elapsedMs: number };
 
-/** Session counters for one client instance, plus the cost estimate they add up to. */
+/** Session counters for one client instance, plus what they cost: the cost a backend reported, else the estimate. */
 export interface UsageSnapshot {
   readonly requestsStarted: number;
   readonly requestsSucceeded: number;
@@ -229,6 +229,17 @@ function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions:
     if (answer.type === "score" && (!Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !Object.hasOwn(answer, "legend"))) return false;
   }
   return true;
+}
+
+/**
+ * What a response says the request cost, in USD: OpenRouter's `usage.cost`. On a BYOK request that `cost` is
+ * OpenRouter's fee alone, while the upstream provider bills the inference, so it does not stand for the request's cost.
+ * A missing, malformed, or BYOK cost is undefined, which leaves the request to the estimate; it is never an error.
+ */
+function reportedUsd(usage: unknown): number | undefined {
+  if (usage === null || typeof usage !== "object") return undefined;
+  const { cost, is_byok: byok } = usage as { cost?: unknown; is_byok?: unknown };
+  return byok !== true && typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined;
 }
 
 const CAP_LABELS: Record<BlockedCap["cap"], string> = {
@@ -407,7 +418,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     logLevel: "off",
     ...(transport ? { fetch: transport } : {}),
   });
-  // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone.
+  // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone,
+  // and only when its backend reports no cost.
   const rateFor = (sent: string): number => callerRate ?? backendPrice(backend, sent) ?? DEFAULT_USD_PER_MTOK;
   const usdPerMTok = rateFor(model);
   // The ledger's own rate only estimates input tokens that carry no recorded cost, so it follows the caller's price alone.
@@ -516,8 +528,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         // An unreported count is not a count this package can add, price, or charge against a token cap.
         const inputTokens = result.usage.input_tokens ?? 0;
         const outputTokens = result.usage.output_tokens ?? 0;
-        // Unrounded: a small request must still count toward the cap.
-        const cost = (inputTokens * rateFor(sentModel)) / 1e6;
+        // What the backend billed, where it says so; else the estimate. Unrounded: a small request must still count toward the cap.
+        const cost = (backend.reportsCost === true ? reportedUsd(result.usage) : undefined) ?? (inputTokens * rateFor(sentModel)) / 1e6;
         attempt.succeed(inputTokens, outputTokens, cost);
         syncAuth({ type: "verified" });
         return { ...result, elapsedMs: Math.round(performance.now() - start) };
