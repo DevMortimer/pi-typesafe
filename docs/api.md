@@ -30,7 +30,7 @@ result.answers.severity.score;   // 0..2, may be fractional
 | `maxInputBytes` | `65536` (`2097152` on `warden-s1`) | UTF-8 JSON bytes, not tokens |
 | `maxRequests` | `20` | Attempts per client instance, failures included |
 | `maxRequestsPerDay`, `maxInputTokensPerDay`, `maxUsdPerDay` | none | Local-day caps, persisted |
-| `usdPerMTok` | the backend's price for the model sent, else `0.042` | Price in USD per million input tokens for the estimate and the USD cap; `0` means free. A value you pass wins over the backend's price |
+| `usdPerMTok` | the backend's price for the model sent, else `0.042` | Price in USD per million input tokens for the estimate and the USD cap; `0` means free. A value you pass wins over the backend's price; a cost the backend reports wins over both (see [Usage and spend](#usage-and-spend)) |
 | `ledger` | the store next to the key | Inject a ledger in tests |
 | `fetch` | global fetch | Inject a transport for offline tests |
 
@@ -111,9 +111,9 @@ Day caps live in `~/.pi/agent/pi-typesafe/usage.json` (owner-only, atomic, best-
 | --- | --- | --- |
 | `maxRequestsPerDay` | `PI_TYPESAFE_MAX_REQUESTS_PER_DAY` | requests |
 | `maxInputTokensPerDay` | `PI_TYPESAFE_MAX_INPUT_TOKENS_PER_DAY` | input tokens |
-| `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | estimated spend |
+| `maxUsdPerDay` | `PI_TYPESAFE_MAX_USD_PER_DAY` | reported or estimated spend |
 
-The environment may lower an explicit cap, never raise it. A reached cap raises a `budget` error that names the cap, the amount used, and the day, before anything is submitted. Cost is estimated from input tokens only, because output is free. Each request is priced when it is recorded, at its own model's price, so one ledger can hold requests to backends and models with different prices and the day's spend, and the `maxUsdPerDay` cap, add up what each request cost; requests to a free model add nothing. A token count the API did not report (0.7.0 reports `null`) adds nothing to the session or daily totals and is priced at zero, because there is nothing to count or price; the request still counts as an attempt against the request cap. A ledger file written before costs were recorded keeps working: days without a recorded cost are estimated at the ledger's `usdPerMTok` (default `0.042`).
+The environment may lower an explicit cap, never raise it. A reached cap raises a `budget` error that names the cap, the amount used, and the day, before anything is submitted. Cost is estimated from input tokens only, because output is free. Each request is priced when it is recorded, at its own model's price, so one ledger can hold requests to backends and models with different prices and the day's spend, and the `maxUsdPerDay` cap, add up what each request cost; requests to a free model add nothing. A backend that reports what each request was billed is recorded at that instead of an estimate: `openrouter` (`reportsCost: true` in its registry entry) answers with `usage.cost` in USD, so the session's `estimatedUsd`, the day's spend, the `maxUsdPerDay` cap, and the status lines follow what OpenRouter charged, whatever `usdPerMTok` says. A missing or malformed `cost` — anything but a finite, non-negative number — is ignored, never an error, and that request is estimated as before; so is the `cost` of a BYOK request (`usage.is_byok: true`), which is OpenRouter's fee alone, not what the upstream provider charged. No other backend's `usage.cost` is read, and a caller-supplied endpoint cannot declare `reportsCost`. A token count the API did not report (0.7.0 reports `null`) adds nothing to the session or daily totals and is priced at zero, because there is nothing to count or price; the request still counts as an attempt against the request cap. A ledger file written before costs were recorded keeps working: days without a recorded cost are estimated at the ledger's `usdPerMTok` (default `0.042`).
 
 `openUsageLedger(options)`, `usagePath()`, `estimateUsd(tokens, usdPerMTok)`, `capsFromEnvironment(env)`, and `mergeCaps(explicit, environment)` expose the same arithmetic for your own display.
 

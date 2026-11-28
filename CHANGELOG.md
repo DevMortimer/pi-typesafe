@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Requests on the `openrouter` backend are recorded at the cost OpenRouter reports in `usage.cost` (USD) instead of the input-token estimate, so `maxUsdPerDay`, `getUsage().estimatedUsd`, `getSpend()`, and the status lines follow what was billed (#18). A missing or malformed cost, or the fee-only cost of a BYOK request, keeps the estimate and never fails the response. Registry entries declare this with the new `RegistryBackendConfig.reportsCost`; caller-supplied endpoints cannot.
+
 ### Fixed
 
 - `listModels()` on the `openrouter` backend returns the Jev ids OpenRouter's Decisions API accepts, such as `typesafe/jev-1.13` and `~typesafe/jev-latest`, instead of OpenRouter's chat-model catalogue, which lists none of them (#16). The model list now asks `/api/v1/models` for the models served at `/api/alpha/decisions` by the `typesafe` author; the `BackendConfig` fields are unchanged.

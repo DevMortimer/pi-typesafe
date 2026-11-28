@@ -26,10 +26,12 @@ export interface BackendConfig {
   limits?: Readonly<Partial<BackendLimits>>;
 }
 
-/** A registry entry: a backend config that can also name a price per model. Caller-supplied endpoints carry none. */
+/** A registry entry: a backend config that can also name a price per model and report what it billed. Caller-supplied endpoints carry neither. */
 export interface RegistryBackendConfig extends BackendConfig {
   /** USD per million input tokens, by the model id as it is sent. A model with no entry is priced at DEFAULT_USD_PER_MTOK. */
   prices?: Readonly<Record<string, number>>;
+  /** True when a response's `usage.cost` is what the request was billed, in USD; the client records it instead of an estimate. Absent means every request is estimated. */
+  reportsCost?: boolean;
 }
 
 /** A caller-supplied endpoint that serves the Jev decisions protocol. Passed per call; never added to the registry. */
@@ -81,6 +83,7 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     modelsField: "data",
     modelsIdField: "id",
     modelsVerifyKey: false,
+    reportsCost: true,
   },
   commandcode: {
     label: "Command Code",
