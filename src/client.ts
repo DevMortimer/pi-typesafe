@@ -1,5 +1,7 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
+import { attributionHeaders } from "./attribution.js";
+import type { Attribution } from "./attribution.js";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
 import { backendPrice, resolveBackend, sentModelId } from "./backends.js";
 import type { BackendConfig, BackendSpec, RegistryBackendConfig, ResolvedBackend } from "./backends.js";
@@ -17,6 +19,7 @@ import type { DaemonEndpoint } from "./warden-s1-daemon.js";
 
 export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, sentModelId, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
+export type { Attribution } from "./attribution.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
@@ -122,19 +125,21 @@ export interface TypeSafeOptions {
   maxRequestsPerDay?: number;
   /** Input tokens per local day. Unlimited by default. */
   maxInputTokensPerDay?: number;
-  /** Estimated spend per local day, in US dollars. Unlimited by default. */
+  /** Spend per local day, in US dollars: what the backend reported, else the estimate. Unlimited by default. */
   maxUsdPerDay?: number;
-  /** Price in USD per million input tokens, used for every request's cost and the USD cap; 0 means free. Default: the backend's price for the model sent, else DEFAULT_USD_PER_MTOK. */
+  /** Price in USD per million input tokens, used for a request's cost and the USD cap when the backend reports no cost; 0 means free. Default: the backend's price for the model sent, else DEFAULT_USD_PER_MTOK. */
   usdPerMTok?: number;
   /** The usage ledger; defaults to the store next to the key. Injected by tests. */
   ledger?: UsageLedger;
+  /** How OpenRouter's app attribution names your app; sent only to the `openrouter` backend. Default: pi-typesafe. Validated on every backend. */
+  attribution?: Attribution;
   /** Transport injection for extension authors and offline tests. */
   fetch?: Fetch;
 }
 export interface EvaluationOptions { signal?: AbortSignal }
 export type Evaluation<Q extends Questions> = SystemOneResult<Q> & { readonly elapsedMs: number };
 
-/** Session counters for one client instance, plus the cost estimate they add up to. */
+/** Session counters for one client instance, plus what they cost: the cost a backend reported, else the estimate. */
 export interface UsageSnapshot {
   readonly requestsStarted: number;
   readonly requestsSucceeded: number;
@@ -229,6 +234,17 @@ function validResult<Q extends Questions>(result: SystemOneResult<Q>, questions:
     if (answer.type === "score" && (!Number.isFinite(answer.score) || answer.score < 0 || answer.score > keys.length - 1 || !Object.hasOwn(answer, "legend"))) return false;
   }
   return true;
+}
+
+/**
+ * What a response says the request cost, in USD: OpenRouter's `usage.cost`. On a BYOK request that `cost` is
+ * OpenRouter's fee alone, while the upstream provider bills the inference, so it does not stand for the request's cost.
+ * A missing, malformed, or BYOK cost is undefined, which leaves the request to the estimate; it is never an error.
+ */
+function reportedUsd(usage: unknown): number | undefined {
+  if (usage === null || typeof usage !== "object") return undefined;
+  const { cost, is_byok: byok } = usage as { cost?: unknown; is_byok?: unknown };
+  return byok !== true && typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined;
 }
 
 const CAP_LABELS: Record<BlockedCap["cap"], string> = {
@@ -395,6 +411,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   if (requested === undefined) throw new TypeSafeIntegrationError("configuration", `Backend "${backend.label}" names no defaultModel; pass model to createTypeSafe.`);
   if (typeof requested !== "string" || !requested.trim() || requested.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   const model = mapModel(requested);
+  // Checked on every backend, so a bad value fails where it is written rather than only once a user picks OpenRouter.
+  const attribution = attributionHeaders(options.attribution);
   // Do not inherit SDK debug logging or alternate destinations from the environment.
   const client = new TypeSafeClient({
     apiKey,
@@ -405,9 +423,12 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     // 0.7.0 zstd-compresses any body of 1 KiB or more by default; this package's five backends are unmeasured for it.
     compression: false,
     logLevel: "off",
+    // App attribution is OpenRouter's own convention; every other backend gets exactly the SDK's headers.
+    ...(backend.name === "openrouter" ? { defaultHeaders: attribution } : {}),
     ...(transport ? { fetch: transport } : {}),
   });
-  // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone.
+  // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone,
+  // and only when its backend reports no cost.
   const rateFor = (sent: string): number => callerRate ?? backendPrice(backend, sent) ?? DEFAULT_USD_PER_MTOK;
   const usdPerMTok = rateFor(model);
   // The ledger's own rate only estimates input tokens that carry no recorded cost, so it follows the caller's price alone.
@@ -516,8 +537,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
         // An unreported count is not a count this package can add, price, or charge against a token cap.
         const inputTokens = result.usage.input_tokens ?? 0;
         const outputTokens = result.usage.output_tokens ?? 0;
-        // Unrounded: a small request must still count toward the cap.
-        const cost = (inputTokens * rateFor(sentModel)) / 1e6;
+        // What the backend billed, where it says so; else the estimate. Unrounded: a small request must still count toward the cap.
+        const cost = (backend.reportsCost === true ? reportedUsd(result.usage) : undefined) ?? (inputTokens * rateFor(sentModel)) / 1e6;
         attempt.succeed(inputTokens, outputTokens, cost);
         syncAuth({ type: "verified" });
         return { ...result, elapsedMs: Math.round(performance.now() - start) };

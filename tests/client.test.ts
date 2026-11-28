@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, openUsageLedger, TypeSafeIntegrationError } from "../src/index.js";
+import { createTypeSafe, choice, noul, score, normalizeEvaluationRequest, parseEvaluationRequest, authState, clearAuthState, openUsageLedger, DECISIONS_BACKENDS, TypeSafeIntegrationError } from "../src/index.js";
 import { AUTH_REJECTION_TTL_MS, authStatePath } from "../src/auth.js";
 import { piTypesafeDir } from "../src/credentials.js";
 import { safeError } from "../src/errors.js";
@@ -418,7 +418,7 @@ test("known backend is called at its full request URL", async () => {
 test("listModels asks each backend for its own model list", async () => {
   const backends = [
     ["typesafe", "https://api.typesafe.ai/v1/models", { models: [{ name: "jev-latest" }] }, ["jev-latest"]],
-    ["openrouter", "https://openrouter.ai/api/v1/models", { data: [{ id: "vendor/model", name: "Vendor: Model" }] }, ["vendor/model"]],
+    ["openrouter", "https://openrouter.ai/api/v1/models?endpoints=%2Fapi%2Falpha%2Fdecisions&model_authors=typesafe", { data: [{ id: "vendor/model", name: "Vendor: Model" }] }, ["vendor/model"]],
   ] as const;
   for (const [backend, expectedUrl, wire, expected] of backends) {
     let capturedUrl = "";
@@ -430,6 +430,36 @@ test("listModels asks each backend for its own model list", async () => {
     assert.deepEqual(await client.listModels(), expected);
     assert.equal(capturedUrl, expectedUrl);
   }
+});
+
+test("OpenRouter's model list asks for TypeSafe's models on the Decisions path, and each id it returns is sent unchanged", async () => {
+  // OpenRouter's bare catalogue lists chat models the Decisions API refuses, so the list is filtered where it is served.
+  const sent: Array<{ url: string; model?: string }> = [];
+  const client = createTypeSafe({
+    apiKey: "test-key",
+    backend: "openrouter",
+    fetch: async (url, init) => {
+      if (init?.method === "GET") {
+        sent.push({ url: String(url) });
+        return Response.json({ data: [
+          { id: "typesafe/jev-1.14", name: "TypeSafe: Jev 1.14" },
+          { id: "~typesafe/jev-latest", name: "TypeSafe: Jev Latest" },
+          { id: "typesafe/jev-1.13", name: "TypeSafe: Jev 1.13" },
+        ] });
+      }
+      sent.push({ url: String(url), model: (JSON.parse(String(init?.body)) as { model: string }).model });
+      return responseFor(sample().questions);
+    },
+  });
+  const models = await client.listModels();
+  assert.deepEqual(models, ["typesafe/jev-1.14", "~typesafe/jev-latest", "typesafe/jev-1.13"]);
+  const list = new URL(sent[0]?.url ?? "");
+  assert.equal(`${list.origin}${list.pathname}`, "https://openrouter.ai/api/v1/models");
+  assert.equal(list.searchParams.get("endpoints"), "/api/alpha/decisions");
+  assert.equal(list.searchParams.get("endpoints"), DECISIONS_BACKENDS.openrouter.path);
+  assert.equal(list.searchParams.get("model_authors"), "typesafe");
+  for (const model of models) await client.evaluate({ ...sample(), model });
+  assert.deepEqual(sent.slice(1), models.map(model => ({ url: "https://openrouter.ai/api/alpha/decisions", model })));
 });
 
 test("a model list without the backend's declared field keeps the SDK's own shape error", async () => {

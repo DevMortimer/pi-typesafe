@@ -26,10 +26,12 @@ export interface BackendConfig {
   limits?: Readonly<Partial<BackendLimits>>;
 }
 
-/** A registry entry: a backend config that can also name a price per model. Caller-supplied endpoints carry none. */
+/** A registry entry: a backend config that can also name a price per model and report what it billed. Caller-supplied endpoints carry neither. */
 export interface RegistryBackendConfig extends BackendConfig {
   /** USD per million input tokens, by the model id as it is sent. A model with no entry is priced at DEFAULT_USD_PER_MTOK. */
   prices?: Readonly<Record<string, number>>;
+  /** True when a response's `usage.cost` is what the request was billed, in USD; the client records it instead of an estimate. Absent means every request is estimated. */
+  reportsCost?: boolean;
 }
 
 /** A caller-supplied endpoint that serves the Jev decisions protocol. Passed per call; never added to the registry. */
@@ -65,6 +67,9 @@ export const DEFAULT_BACKEND: TypeSafeBackend = "typesafe";
 /** The environment variable and login store that the default backend reads. */
 export const TYPESAFE_KEY_ENV = "TYPESAFE_API_KEY";
 
+/** Where OpenRouter serves its Decisions API: the judgment request goes here, and the model list keeps what is served here. */
+const OPENROUTER_DECISIONS_PATH = "/api/alpha/decisions";
+
 /** Registry of known judgment backends. Callers pass a `BackendEndpoint` for a host this registry does not name. */
 export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> = {
   typesafe: { label: "TypeSafe", host: "https://api.typesafe.ai", keyEnv: TYPESAFE_KEY_ENV },
@@ -72,11 +77,13 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     label: "OpenRouter",
     host: "https://openrouter.ai",
     keyEnv: "OPENROUTER_API_KEY",
-    path: "/api/alpha/decisions",
-    modelsPath: "/api/v1/models",
+    path: OPENROUTER_DECISIONS_PATH,
+    // The bare catalogue lists chat models, which the Decisions API refuses; keep TypeSafe's models served at its path.
+    modelsPath: `/api/v1/models?endpoints=${encodeURIComponent(OPENROUTER_DECISIONS_PATH)}&model_authors=typesafe`,
     modelsField: "data",
     modelsIdField: "id",
     modelsVerifyKey: false,
+    reportsCost: true,
   },
   commandcode: {
     label: "Command Code",
