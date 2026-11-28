@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `listModels()` on the `openrouter` backend returns the Jev ids OpenRouter's Decisions API accepts, such as `typesafe/jev-1.13` and `~typesafe/jev-latest`, instead of OpenRouter's chat-model catalogue, which lists none of them (#16). The model list now asks `/api/v1/models` for the models served at `/api/alpha/decisions` by the `typesafe` author; the `BackendConfig` fields are unchanged.
+
 ## 0.16.0
 
 ### Added
