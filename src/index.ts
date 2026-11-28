@@ -1,7 +1,7 @@
 export { createTypeSafe, backendHost, backendPrice, backendFromEnvironment, modelFromEnvironment, resolveBackend, sentModelId, BACKEND_ENV, MODEL_ENV, DEFAULT_MAX_REQUESTS, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./client.js";
 export type {
   TypeSafe, TypeSafeOptions, EvaluationOptions, Evaluation, UsageSnapshot, SpendReport, BudgetState,
-  TypeSafeBackend, BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend,
+  TypeSafeBackend, BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, Attribution,
 } from "./client.js";
 export { ask, DEFAULT_ASK_TIMEOUT_MS } from "./ask.js";
 export type { AskAnswer, AskOptions, Judge } from "./ask.js";

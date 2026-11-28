@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- OpenRouter app-attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`, and, when asked, `X-OpenRouter-App-Visibility: hidden`) on the `openrouter` backend's judgment request and model list, naming pi-typesafe by default (#17). The new `createTypeSafe` option `attribution` (type `Attribution`) lets an extension built on this library name itself instead; it is validated on every backend, and no other backend receives the headers.
+
 ## 0.16.0
 
 ### Added

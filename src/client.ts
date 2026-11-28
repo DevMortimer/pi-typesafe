@@ -1,5 +1,7 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Fetch, Questions, SystemOneRequest, SystemOneResult } from "@typesafe-ai/sdk";
+import { attributionHeaders } from "./attribution.js";
+import type { Attribution } from "./attribution.js";
 import { recordAuthFailure, recordAuthVerified } from "./auth.js";
 import { backendPrice, resolveBackend, sentModelId } from "./backends.js";
 import type { BackendConfig, BackendSpec, RegistryBackendConfig, ResolvedBackend } from "./backends.js";
@@ -17,6 +19,7 @@ import type { DaemonEndpoint } from "./warden-s1-daemon.js";
 
 export { BACKEND_ENV, MODEL_ENV, backendFromEnvironment, backendHost, backendPrice, modelFromEnvironment, resolveBackend, sentModelId, DECISIONS_BACKENDS, DEFAULT_BACKEND } from "./backends.js";
 export type { BackendConfig, BackendEndpoint, BackendSpec, RegistryBackendConfig, ResolvedBackend, TypeSafeBackend } from "./backends.js";
+export type { Attribution } from "./attribution.js";
 
 /** The paths the SDK appends to whatever base URL it is given. */
 const SDK_PATH = "/v1/systemone";
@@ -128,6 +131,8 @@ export interface TypeSafeOptions {
   usdPerMTok?: number;
   /** The usage ledger; defaults to the store next to the key. Injected by tests. */
   ledger?: UsageLedger;
+  /** How OpenRouter's app attribution names your app; sent only to the `openrouter` backend. Default: pi-typesafe. Validated on every backend. */
+  attribution?: Attribution;
   /** Transport injection for extension authors and offline tests. */
   fetch?: Fetch;
 }
@@ -395,6 +400,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
   if (requested === undefined) throw new TypeSafeIntegrationError("configuration", `Backend "${backend.label}" names no defaultModel; pass model to createTypeSafe.`);
   if (typeof requested !== "string" || !requested.trim() || requested.length > 100) throw new TypeSafeIntegrationError("configuration", "model must be a nonempty string of at most 100 characters.");
   const model = mapModel(requested);
+  // Checked on every backend, so a bad value fails where it is written rather than only once a user picks OpenRouter.
+  const attribution = attributionHeaders(options.attribution);
   // Do not inherit SDK debug logging or alternate destinations from the environment.
   const client = new TypeSafeClient({
     apiKey,
@@ -405,6 +412,8 @@ export function createTypeSafe(options: TypeSafeOptions = {}): TypeSafe {
     // 0.7.0 zstd-compresses any body of 1 KiB or more by default; this package's five backends are unmeasured for it.
     compression: false,
     logLevel: "off",
+    // App attribution is OpenRouter's own convention; every other backend gets exactly the SDK's headers.
+    ...(backend.name === "openrouter" ? { defaultHeaders: attribution } : {}),
     ...(transport ? { fetch: transport } : {}),
   });
   // The caller's price wins; else the backend's price for the model sent; else the default. Each request is priced alone.
