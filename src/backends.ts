@@ -65,6 +65,9 @@ export const DEFAULT_BACKEND: TypeSafeBackend = "typesafe";
 /** The environment variable and login store that the default backend reads. */
 export const TYPESAFE_KEY_ENV = "TYPESAFE_API_KEY";
 
+/** Where OpenRouter serves its Decisions API: the judgment request goes here, and the model list keeps what is served here. */
+const OPENROUTER_DECISIONS_PATH = "/api/alpha/decisions";
+
 /** Registry of known judgment backends. Callers pass a `BackendEndpoint` for a host this registry does not name. */
 export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> = {
   typesafe: { label: "TypeSafe", host: "https://api.typesafe.ai", keyEnv: TYPESAFE_KEY_ENV },
@@ -72,8 +75,9 @@ export const DECISIONS_BACKENDS: Record<TypeSafeBackend, RegistryBackendConfig> 
     label: "OpenRouter",
     host: "https://openrouter.ai",
     keyEnv: "OPENROUTER_API_KEY",
-    path: "/api/alpha/decisions",
-    modelsPath: "/api/v1/models",
+    path: OPENROUTER_DECISIONS_PATH,
+    // The bare catalogue lists chat models, which the Decisions API refuses; keep TypeSafe's models served at its path.
+    modelsPath: `/api/v1/models?endpoints=${encodeURIComponent(OPENROUTER_DECISIONS_PATH)}&model_authors=typesafe`,
     modelsField: "data",
     modelsIdField: "id",
     modelsVerifyKey: false,
