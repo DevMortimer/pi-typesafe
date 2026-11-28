@@ -30,7 +30,7 @@ function recording(): { fetch: (url: string, init?: RequestInit) => Promise<Resp
     fetch: async (url, init) => {
       const headers = Object.fromEntries([...new Headers(init?.headers)].filter(([name]) => ATTRIBUTION_HEADERS.includes(name)));
       sent.push({ url: String(url), headers });
-      return String(url).endsWith("/models") ? Response.json({ data: [{ id: "typesafe/jev-1.13" }] }) : reply();
+      return new URL(String(url)).pathname.endsWith("/models") ? Response.json({ data: [{ id: "typesafe/jev-1.13" }] }) : reply();
     },
   };
 }
@@ -43,7 +43,7 @@ test("OpenRouter's judgment request and model list both name pi-typesafe by defa
   const expected = { "http-referer": "https://github.com/DevMortimer/pi-typesafe", "x-openrouter-title": "pi-typesafe", "x-openrouter-categories": "cli-agent" };
   assert.deepEqual(sent, [
     { url: "https://openrouter.ai/api/alpha/decisions", headers: expected },
-    { url: "https://openrouter.ai/api/v1/models", headers: expected },
+    { url: `https://openrouter.ai${DECISIONS_BACKENDS.openrouter.modelsPath}`, headers: expected },
   ]);
   // The headers name the app, never the key or what was submitted.
   for (const value of Object.values(expected)) {
